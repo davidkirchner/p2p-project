@@ -3,12 +3,17 @@ marp: true
 theme: default
 ---
 
-# My Presentation
-Welcome to the first slide.
+## Objectives
+- Build a messenger
+- Communication is encrypted
+- Allow sending messages to offline peers
+- Optional: File-Sharing, Group Chats
 
 ---
 
-## Second Slide
-- Point 1
-- Point 2
-- Separate slides simply with three dashes (`---`)
+## Technical Challenges
+- Username $\rightarrow$ IP mapping
+- verifiable peer identification
+- Caching messages for offline peers
+- Protecting from attackers (e.g. Spam)
+- Encryption of Metadata: Who communicates with whom? (this might be very hard to solve)
