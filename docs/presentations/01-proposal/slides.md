@@ -1,6 +1,7 @@
 ---
 marp: true
 theme: default
+footer: "Group #8: Messenger - Adan Abidin, Richard Förster, David Kirchner"
 ---
 
 ## Objectives
@@ -12,8 +13,10 @@ theme: default
 ---
 
 ## Technical Challenges
+- Message Routing
+- Connection management
 - Username $\rightarrow$ IP mapping
-- verifiable peer identification
+- Verifiable peer identification
 - Caching messages for offline peers
-- Protecting from attackers (e.g. Spam)
-- Encryption of Metadata: Who communicates with whom? (this might be very hard to solve)
+- Protecting from attackers (Spam, Malicious Peers)
+- Reduction of publicly visible metadata (who communicates with whom and when?)
