@@ -11,11 +11,17 @@
 7. The whole network joining and leaving dance
 8. Chat datastructure and persistance
 
-## Offline Storage
 
-1. ???
+## Offline Caching
+
+1. Encryption of messages, checksumms
+2. Push or Pull mechanism for requesting unread messages
+3. Discovering unread messages from peers
+4. Handling peer failure (forwarding messgages to other peers)
+5. Encryption of sender/receiver information when storing
 
 
 ## Group chats
 
-1. ???
+1. Caching of messages for offli
+2. 
