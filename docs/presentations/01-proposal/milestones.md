@@ -5,11 +5,12 @@
 1. Finding my own public IP adress
 2. Connecting two clients given their adress
 3. Encryption of direct communication
-4. Public key infrastructure
-5. Maintaining peer to peer connections
-6. Finding other peers given a public key
-7. The whole network joining and leaving dance
-8. Chat datastructure and persistance
+4. Public key infrastructure (generating and exchanging)
+5. Peer identity verification
+6. Maintaining peer to peer connections
+7. Finding other peers given a public key
+8. The whole network joining and leaving dance
+9. Chat datastructure and persistance
 
 
 ## Offline Caching
