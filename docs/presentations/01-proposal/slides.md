@@ -13,9 +13,9 @@ footer: "Group #8: Messenger - Adan Abidin, Richard Förster, David Kirchner"
 ---
 
 ## Technical Challenges
-- Message Routing
 - Connection management
-- Username $\rightarrow$ IP mapping
+- Message Routing
+- Username/ID $\rightarrow$ IP mapping
 - Verifiable peer identification
 - Caching messages for offline peers
 - Protecting from attackers (Spam, Malicious Peers)
