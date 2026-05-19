@@ -16,3 +16,10 @@
   redundancy,
 * **Security & Abuse:** We want to protect or at least try to mitigate attack on the network, such as spam, cache abuse (many messages or large messages), cache lifetimes, not following protocol, freeriders and malicious nodes
 * **Metadata Privacy:** Finally, while end-to-end encryption hides the *content* of the messages, hiding the *metadata* - meaning who is communicating with whom and when - is quite a hard problem. We want to explore techniques to minimize metadata to a reasonable extent. Especially interesting is this feature in combination with the message caching, since encrypted receiver adresses make message retrieval very non-trivial.
+
+
+
+### Feedback
+Have a look into:
+- Dead-Drop
+- BitChat
