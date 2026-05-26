@@ -1,8 +1,13 @@
 dummy_var = 42
+import asyncio
 
-def main():
-    print("Hello from p2p-project!")
+from network.server import start_server
+
+async def main():
+    print("Starting P2P node...")
+
+    await start_server()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
