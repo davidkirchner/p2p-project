@@ -12,8 +12,8 @@ MessageID = NewType("MessageID", uuid.UUID)
 
 
 class Test(abc.ABC):
-    @abc.abstractmethod
     @classmethod
+    @abc.abstractmethod
     async def by_id(cls, id) -> Self:
         ...
 
@@ -51,6 +51,11 @@ class Message(Test):
     
     
 class Context(abc.ABC):
+    
+    User: type[User]
+    Chat: type[Chat]
+    Message: type[Message]
+    
     @abc.abstractmethod
     def transaction(self) -> AsyncContextDecorator:
         ...
