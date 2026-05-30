@@ -1,19 +1,23 @@
 from functools import partial
+from inspect import isawaitable
 import sys
 import os
+import re
 
 from contextlib import closing
 import threading
 import time
-from typing import Callable, List, Self
+from typing import Awaitable, Callable, List, Self
 import asyncio
+import argparse
 
 from config import Config
 from db.sqlite_impl import SqliteDatabase
 from models import *
 
+
 class SimpleTerminalUI:
-    def __init__(self, database: Context, incoming_events: asyncio.Queue, outgoing_events: asyncio.Queue, user: UserID, current_chat: ChatID | None = None):
+    def __init__(self, database: Context, incoming_events: asyncio.Queue, outgoing_events: asyncio.Queue, user: UserID | None = None, current_chat: ChatID | None = None):
         self.database = database
         self.incoming_events = incoming_events
         self.outgoing_events = outgoing_events
@@ -25,16 +29,17 @@ class SimpleTerminalUI:
         self._bound_tasks = {}
         
     @classmethod
-    async def create_and_start(cls, database: Context, incoming_events: asyncio.Queue, user: UserID) -> Self:
+    async def create_and_start(cls, database: Context, incoming_events: asyncio.Queue, user: UserID | None = None, current_chat: ChatID | None = None) -> Self:
         ui = cls(
             database=database,
             incoming_events=incoming_events,
             outgoing_events=asyncio.Queue(),
-            user=user
+            user=user,
+            current_chat=current_chat
         )
-        ui._bind_task(asyncio.create_task(input_loop(lambda i: ui._bind_task(asyncio.create_task(ui._handle_raw_input(i))))), "input_loop")
+        ui._bind_task(asyncio.create_task(input_loop(ui._handle_raw_input)), "input_loop")
         ui._bind_task(asyncio.create_task(ui._handle_incoming_message_loop()), "handle_incoming_message_loop")
-        await ui.handle_chat(None)
+        await ui.display_chat(None)
         return ui
     
     def _bind_task(self, task: asyncio.Task, name: str | asyncio.Task | None = None):
@@ -57,11 +62,18 @@ class SimpleTerminalUI:
         task.add_done_callback(remove)
     
     async def _handle_raw_input(self, input: str):
-        if input == "exit\n":
-            self.exit_event.set()
-            return
+        if input.startswith(" "):
+            command = list(filter(None, re.split(r"\s+", input.strip())))
+            
+            if input.strip() in ("exit",):
+                self.exit_event.set()
+                return
+            
+            if self.current_chat and input.strip() in ("r", "return"):
+                await self.display_chat(None)
+                return
         
-        assert self.current_chat
+        assert self.current_chat and self.user
         assert isinstance(self.database, SqliteDatabase)
         
         msg = await self.database.create_message( 
@@ -92,7 +104,7 @@ class SimpleTerminalUI:
         sys.stdout.write("\033[2J\033[H")
         sys.stdout.flush()
     
-    async def handle_chat(self, chat: ChatID | None):
+    async def display_chat(self, chat: ChatID | None):
         self.current_chat = chat
         self.clear_screen()
         
@@ -138,10 +150,12 @@ class SimpleTerminalUI:
         
 
 
-async def input_loop(handle_input: Callable[[str], None]):
+async def input_loop(handle_input: Callable[[str], None | Awaitable[None]]):
     while True:
         result = await asyncio.to_thread(sys.stdin.readline)
-        handle_input(result)
+        res = handle_input(result)
+        if isawaitable(res):
+            await res
 
 
 async def main() -> None:
@@ -151,11 +165,18 @@ async def main() -> None:
     ui = None
     
     try:
-        alice = await database.User.by_id("user/alice")
-        chat = (await alice.chats())[0]
+        try:
+            alice = await database.User.by_id("user/alice")
+            chat_id = (await alice.chats())[0]
+        except KeyError:
+            alice = await database.create_user("Alice")
+            bob = await database.create_user("Bob")
+            chat = await database.create_chat("TEst chat", participants=[alice.id, bob.id])
+            message = await database.create_message(chat.id, bob.id, b"whatsup")
+            chat_id = chat.id
         
         ui = await SimpleTerminalUI.create_and_start(database=database, incoming_events=events, user=alice.id)
-        await ui.handle_chat(chat)
+        await ui.display_chat(chat_id)
                 
         await ui.exit_event.wait()
     finally:
