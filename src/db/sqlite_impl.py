@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 
 
 @dataclass
-class SqliteDatabase(m.Context):
+class SqliteDatabase(m.Storage):
 
     User: type[m.User]
     Chat: type[m.Chat]

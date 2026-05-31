@@ -9,6 +9,7 @@ dependencies = [
     "aiosqlite>=0.22.1",
     "async-lru>=2.3.0",
     "pytest>=9.0.3",
+    "python-dotenv>=1.2.2",
 ]
 
 [tool.pytest.ini_options]

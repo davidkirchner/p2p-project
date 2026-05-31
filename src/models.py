@@ -11,14 +11,18 @@ ChatID = NewType("ChatID", uuid.UUID)
 MessageID = NewType("MessageID", uuid.UUID)
 
 
-class Test(abc.ABC):
+class Thing(abc.ABC):
     @classmethod
     @abc.abstractmethod
     async def by_id(cls, id) -> Self:
         ...
 
+    # not needed right now
+    # @abc.abstractmethod
+    # async def delete(self):
+    #     ...
 
-class User(Test):
+class User(Thing):
     id: UserID
     name: str
     public_identity: bytes
@@ -29,7 +33,7 @@ class User(Test):
         pass
     
     
-class Chat(Test):
+class Chat(Thing):
     id: ChatID
     title: str
     description: str
@@ -40,7 +44,7 @@ class Chat(Test):
     async def messages(self, n: int, before: datetime) -> list[MessageID]:
         pass
     
-class Message(Test):
+class Message(Thing):
     id: MessageID
     chat: ChatID
     sender: UserID
@@ -50,7 +54,7 @@ class Message(Test):
     content_type: str
     
     
-class Context(abc.ABC):
+class Storage(abc.ABC):
     
     User: type[User]
     Chat: type[Chat]

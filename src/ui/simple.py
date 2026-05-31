@@ -14,10 +14,27 @@ import argparse
 from config import Config
 from db.sqlite_impl import SqliteDatabase
 from models import *
+import shlex
+
+# These are a bunch of classes for messages the ui sends out
+@dataclass
+class ChatContext:
+    chat: ChatID | None
+    user: UserID | None
+
+@dataclass
+class SendMessage(ChatContext):
+    content: bytes
+    content_type: str
+
+
+@dataclass
+class ExecuteCommand(ChatContext):
+    args: list[str]
 
 
 class SimpleTerminalUI:
-    def __init__(self, database: Context, incoming_events: asyncio.Queue, outgoing_events: asyncio.Queue, user: UserID | None = None, current_chat: ChatID | None = None):
+    def __init__(self, database: Storage, incoming_events: asyncio.Queue, outgoing_events: asyncio.Queue, user: UserID | None = None, current_chat: ChatID | None = None):
         self.database = database
         self.incoming_events = incoming_events
         self.outgoing_events = outgoing_events
@@ -29,7 +46,7 @@ class SimpleTerminalUI:
         self._bound_tasks = {}
         
     @classmethod
-    async def create_and_start(cls, database: Context, incoming_events: asyncio.Queue, user: UserID | None = None, current_chat: ChatID | None = None) -> Self:
+    async def create_and_start(cls, database: Storage, incoming_events: asyncio.Queue, user: UserID | None = None, current_chat: ChatID | None = None) -> Self:
         ui = cls(
             database=database,
             incoming_events=incoming_events,
@@ -63,8 +80,10 @@ class SimpleTerminalUI:
     
     async def _handle_raw_input(self, input: str):
         if input.startswith(" "):
-            command = list(filter(None, re.split(r"\s+", input.strip())))
+            command = shlex.split(input.strip())
+            await self.outgoing_events.put(ExecuteCommand(self.current_chat, self.user, command))
             
+            # TODO: for now, also actually exit instead of just sending the message
             if input.strip() in ("exit",):
                 self.exit_event.set()
                 return
@@ -76,6 +95,16 @@ class SimpleTerminalUI:
         assert self.current_chat and self.user
         assert isinstance(self.database, SqliteDatabase)
         
+        
+        # TODO: this part for demonstration purposes right now also creates a database object. 
+        # This should be done outside in the future and the ui is merely notified of changed database state
+        await self.outgoing_events.put(SendMessage(
+            self.current_chat, 
+            self.user, 
+            input.strip().encode("utf-8"), 
+            "text/plain"
+        ))
+
         msg = await self.database.create_message( 
             chat=self.current_chat, 
             sender=self.user, 
@@ -91,7 +120,8 @@ class SimpleTerminalUI:
             self._bind_task(asyncio.create_task(self._handle_incoming_message(res)))
         
     async def _handle_incoming_message(self, message):
-        pass # todo implement this
+        pass # TODO: implement handling of incoming messages from the rest of the system.
+        # What messages will those be?
     
     def _ensure_terminal(self) -> None:
         """Raise exception if stdin/stdout is not a real terminal."""
@@ -147,6 +177,13 @@ class SimpleTerminalUI:
                 await task
             except asyncio.CancelledError:
                 pass
+            
+    async def __aenter__(self) -> Self:
+        return self
+    
+    async def __aexit__(self, *args):
+        await self.close()
+        return True
         
 
 
@@ -159,29 +196,32 @@ async def input_loop(handle_input: Callable[[str], None | Awaitable[None]]):
 
 
 async def main() -> None:
+    import dotenv
+    # TODO: ideally, the corrent env file is passed in during program invocation. Right now dev.env is hard coded. Please provide one for customization if needed
+    dotenv.load_dotenv("dev.env")
     events = asyncio.Queue()
     config = Config.from_env()
     database = await SqliteDatabase.create(config.sqlite_path)
     ui = None
     
+    
+    # create some example user to play with
+    # bob actually never responds
+    # TODO: implement actual user creation and stuff over the prompt line
     try:
-        try:
-            alice = await database.User.by_id("user/alice")
-            chat_id = (await alice.chats())[0]
-        except KeyError:
-            alice = await database.create_user("Alice")
-            bob = await database.create_user("Bob")
-            chat = await database.create_chat("TEst chat", participants=[alice.id, bob.id])
-            message = await database.create_message(chat.id, bob.id, b"whatsup")
-            chat_id = chat.id
-        
-        ui = await SimpleTerminalUI.create_and_start(database=database, incoming_events=events, user=alice.id)
+        alice = await database.User.by_id("user/alice")
+        chat_id = (await alice.chats())[0]
+    except KeyError:
+        alice = await database.create_user("Alice")
+        bob = await database.create_user("Bob")
+        chat = await database.create_chat("TEst chat", participants=[alice.id, bob.id])
+        message = await database.create_message(chat.id, bob.id, b"whatsup")
+        chat_id = chat.id
+    
+    # this context manager automatically does necessary resource management
+    async with await SimpleTerminalUI.create_and_start(database=database, incoming_events=events, user=alice.id) as ui:
         await ui.display_chat(chat_id)
-                
         await ui.exit_event.wait()
-    finally:
-        if ui:
-            await ui.close()
 
 
 if __name__ == "__main__":
