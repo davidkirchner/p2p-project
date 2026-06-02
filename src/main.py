@@ -1,8 +1,4 @@
-dummy_var = 42
-
-def main():
-    print("Hello from p2p-project!")
-
-
 if __name__ == "__main__":
-    main()
+    from ui.simple import main
+    import asyncio
+    asyncio.run(main())
