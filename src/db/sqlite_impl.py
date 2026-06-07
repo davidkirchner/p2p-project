@@ -21,6 +21,12 @@ class SqliteDatabase(m.Storage):
     async def create(cls, path: Path) -> Self:
 
         connection = sqlite3.connect(str(path))
+        
+        # Enable recommended pragmas
+        connection.execute("PRAGMA journal_mode = WAL;")
+        connection.execute("PRAGMA foreign_keys = ON;")
+        connection.execute("PRAGMA busy_timeout = 5000;")
+        connection.execute("PRAGMA synchronous = NORMAL;")
 
         connection.executescript("""
         CREATE TABLE IF NOT EXISTS user (
@@ -37,7 +43,9 @@ class SqliteDatabase(m.Storage):
         CREATE TABLE IF NOT EXISTS chat_participant (
             chat_id TEXT NOT NULL,
             user_id TEXT NOT NULL,
-            PRIMARY KEY (chat_id, user_id)
+            PRIMARY KEY (chat_id, user_id),
+            FOREIGN KEY (chat_id) REFERENCES chat(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS message (
             id TEXT NOT NULL PRIMARY KEY,
@@ -45,7 +53,9 @@ class SqliteDatabase(m.Storage):
             sender TEXT NOT NULL,
             timestamp TEXT NOT NULL,
             content BLOB NOT NULL,
-            content_type TEXT NOT NULL
+            content_type TEXT NOT NULL,
+            FOREIGN KEY (chat) REFERENCES chat(id) ON DELETE CASCADE,
+            FOREIGN KEY (sender) REFERENCES user(id) ON DELETE SET NULL
         );
         """)
         connection.commit()
