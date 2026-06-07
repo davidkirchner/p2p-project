@@ -54,10 +54,20 @@ class SqliteDatabase(m.Storage):
         @dataclass
         class User(m.User):
             id: m.UserID
-            name: str
+            name: str | None
             public_identity: bytes
-            private_identity: bytes
-            
+            private_identity: bytes | None
+
+            @classmethod
+            async def create(cls, name: str, public_identity: bytes = b"", private_identity: bytes = b"") -> "User":
+                user_id = m.UserID(uuid.uuid4())
+                connection.execute(
+                    "INSERT INTO user (id, name, public_identity, private_identity) VALUES (?, ?, ?, ?)",
+                    (str(user_id), name, public_identity, private_identity),
+                )
+                connection.commit()
+                return await cls.by_id(user_id)
+
             @classmethod
             async def by_id(cls, id: m.UserID) -> "User":
                 row = connection.execute(
@@ -72,6 +82,24 @@ class SqliteDatabase(m.Storage):
                     public_identity=row[2] or b"",
                     private_identity=row[3] or b"",
                 )
+
+            async def save(self) -> None:
+                connection.execute(
+                    "UPDATE user SET name = ?, public_identity = ?, private_identity = ? WHERE id = ?",
+                    (self.name, self.public_identity, self.private_identity, str(self.id)),
+                )
+                connection.commit()
+
+            async def delete(self) -> None:
+                connection.execute(
+                    "DELETE FROM chat_participant WHERE user_id = ?",
+                    (str(self.id),)
+                )
+                connection.execute(
+                    "DELETE FROM user WHERE id = ?",
+                    (str(self.id),)
+                )
+                connection.commit()
 
             async def chats(self) -> list[m.ChatID]:
                 rows = connection.execute(
@@ -92,6 +120,21 @@ class SqliteDatabase(m.Storage):
             participants: list[m.UserID]
 
             @classmethod
+            async def create(cls, title: str, description: str = "", participants: list[m.UserID] | None = None) -> "Chat":
+                chat_id = m.ChatID(uuid.uuid4())
+                connection.execute(
+                    "INSERT INTO chat (id, title, description) VALUES (?, ?, ?)",
+                    (str(chat_id), title, description),
+                )
+                for uid in (participants or []):
+                    connection.execute(
+                        "INSERT INTO chat_participant (chat_id, user_id) VALUES (?, ?)",
+                        (str(chat_id), str(uid)),
+                    )
+                connection.commit()
+                return await cls.by_id(chat_id)
+
+            @classmethod
             async def by_id(cls, id: m.ChatID) -> "Chat":
                 row = connection.execute(
                     "SELECT id, title, description FROM chat WHERE id = ?",
@@ -110,6 +153,38 @@ class SqliteDatabase(m.Storage):
                     description=row[2] or "",
                     participants=participants,
                 )
+
+            async def save(self) -> None:
+                connection.execute(
+                    "UPDATE chat SET title = ?, description = ? WHERE id = ?",
+                    (self.title, self.description, str(self.id)),
+                )
+                # Sync participants: delete all and re-insert
+                connection.execute(
+                    "DELETE FROM chat_participant WHERE chat_id = ?",
+                    (str(self.id),)
+                )
+                for uid in self.participants:
+                    connection.execute(
+                        "INSERT INTO chat_participant (chat_id, user_id) VALUES (?, ?)",
+                        (str(self.id), str(uid)),
+                    )
+                connection.commit()
+
+            async def delete(self) -> None:
+                connection.execute(
+                    "DELETE FROM chat_participant WHERE chat_id = ?",
+                    (str(self.id),)
+                )
+                connection.execute(
+                    "DELETE FROM message WHERE chat = ?",
+                    (str(self.id),)
+                )
+                connection.execute(
+                    "DELETE FROM chat WHERE id = ?",
+                    (str(self.id),)
+                )
+                connection.commit()
 
             async def messages(self, n: int, before: datetime) -> list[m.MessageID]:
                 rows = connection.execute(
@@ -132,6 +207,17 @@ class SqliteDatabase(m.Storage):
             content_type: str
 
             @classmethod
+            async def create(cls, chat: m.ChatID, sender: m.UserID, content: bytes, content_type: str = "text/plain") -> "Message":
+                message_id = m.MessageID(uuid.uuid4())
+                timestamp = datetime.now(tz=None)
+                connection.execute(
+                    "INSERT INTO message (id, chat, sender, timestamp, content, content_type) VALUES (?, ?, ?, ?, ?, ?)",
+                    (str(message_id), str(chat), str(sender), timestamp.isoformat(), content, content_type),
+                )
+                connection.commit()
+                return await cls.by_id(message_id)
+
+            @classmethod
             async def by_id(cls, id: m.MessageID) -> "Message":
                 row = connection.execute(
                     "SELECT id, chat, sender, timestamp, content, content_type FROM message WHERE id = ?",
@@ -147,6 +233,20 @@ class SqliteDatabase(m.Storage):
                     content=row[4],
                     content_type=row[5],
                 )
+
+            async def save(self) -> None:
+                connection.execute(
+                    "UPDATE message SET chat = ?, sender = ?, timestamp = ?, content = ?, content_type = ? WHERE id = ?",
+                    (str(self.chat), str(self.sender), self.timestamp.isoformat(), self.content, self.content_type, str(self.id)),
+                )
+                connection.commit()
+
+            async def delete(self) -> None:
+                connection.execute(
+                    "DELETE FROM message WHERE id = ?",
+                    (str(self.id),)
+                )
+                connection.commit()
 
             def __repr__(self) -> str:
                 return f"Message(id={self.id!r}, chat={self.chat!r}, sender={self.sender!r})"
@@ -168,38 +268,3 @@ class SqliteDatabase(m.Storage):
         except Exception:
             self.conn.rollback()
             raise
-
-    # --- Factory / creation helpers ---
-
-    async def create_user(self, name: str, public_identity: bytes = b"", private_identity: bytes = b"") -> m.User:
-        user_id = m.UserID(uuid.uuid4())
-        self.conn.execute(
-            "INSERT INTO user (id, name, public_identity, private_identity) VALUES (?, ?, ?, ?)",
-            (str(user_id), name, public_identity, private_identity),
-        )
-        self.conn.commit()
-        return await self.User.by_id(user_id)
-
-    async def create_chat(self, title: str, description: str = "", participants: list[m.UserID] | None = None) -> m.Chat:
-        chat_id = m.ChatID(uuid.uuid4())
-        self.conn.execute(
-            "INSERT INTO chat (id, title, description) VALUES (?, ?, ?)",
-            (str(chat_id), title, description),
-        )
-        for uid in (participants or []):
-            self.conn.execute(
-                "INSERT INTO chat_participant (chat_id, user_id) VALUES (?, ?)",
-                (str(chat_id), str(uid)),
-            )
-        self.conn.commit()
-        return await self.Chat.by_id(chat_id)
-
-    async def create_message(self, chat: m.ChatID, sender: m.UserID, content: bytes, content_type: str = "text/plain") -> m.Message:
-        message_id = m.MessageID(uuid.uuid4())
-        timestamp = datetime.now(tz=None)
-        self.conn.execute(
-            "INSERT INTO message (id, chat, sender, timestamp, content, content_type) VALUES (?, ?, ?, ?, ?, ?)",
-            (str(message_id), str(chat), str(sender), timestamp.isoformat(), content, content_type),
-        )
-        self.conn.commit()
-        return await self.Message.by_id(message_id)

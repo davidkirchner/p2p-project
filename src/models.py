@@ -17,16 +17,25 @@ class Thing(abc.ABC):
     async def by_id(cls, id) -> Self:
         ...
 
-    # not needed right now
-    # @abc.abstractmethod
-    # async def delete(self):
-    #     ...
+    @abc.abstractmethod
+    async def delete(self):
+        ...
+        
+    @abc.abstractmethod
+    async def save(self):
+        ...
+    
+    @classmethod
+    @abc.abstractmethod
+    async def create(cls, *args, **kwargs) -> Self:
+        ...
+
 
 class User(Thing):
     id: UserID
-    name: str
+    name: str | None
     public_identity: bytes
-    private_identity: bytes
+    private_identity: bytes | None
     
     @abc.abstractmethod
     async def chats(self) -> list[ChatID]:
