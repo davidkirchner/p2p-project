@@ -1,11 +1,6 @@
 import asyncio
 import struct
 
-#outbox queue
-#inbox queue
-#send loop
-#framing (later)
-
 outbox_queue = asyncio.Queue()
 inbox_queue = asyncio.Queue()
 
