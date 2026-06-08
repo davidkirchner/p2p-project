@@ -1,11 +1,18 @@
 import asyncio
+from network.transport import inbox_queue, receive_message
+
 
 async def handle_client(reader,writer):
     addr = writer.get_extra_info("peername")
+    sender_ip = addr[0]
     print(f"Connected with {addr}")
-    data = await reader.read(100)
-    message = data.decode()
-    print("Received:", message)
+    data = await receive_message(reader)
+    await inbox_queue.put(
+        (
+            sender_ip,
+            data
+        )
+    )
     writer.close()
     await writer.wait_closed()
 
