@@ -17,7 +17,7 @@ Best-practice setup for a project that spans many modules:
 
 * Handlers / format / level are configured exactly **once**, as early as
   possible in the entry point, by calling :func:`setup_logging` (see
-  ``ui/simple.py``'s ``main``).
+  ``main.py``).
 
 * The level comes from the ``LOG_LEVEL`` env var (set it in your ``*.env``), so
   it can be changed without touching code. ``LOG_LEVEL=DEBUG`` for development,

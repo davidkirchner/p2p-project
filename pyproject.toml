@@ -10,10 +10,16 @@ dependencies = [
     "async-lru>=2.3.0",
     "cryptography>=48.0.0",
     "pydantic>=2.13.4",
-    "pytest>=9.0.3",
     "python-dotenv>=1.2.2",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+asyncio_mode = "auto"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+]

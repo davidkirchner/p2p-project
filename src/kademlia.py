@@ -1,8 +1,14 @@
-import uuid, base64, hashlib
+import uuid, base64, hashlib, logging, asyncio
+from dataclasses import dataclass
 from enum import Enum
-from typing import Annotated, Self
+from typing import Annotated, Any, Self
 from pydantic import BaseModel, Field, BeforeValidator, PlainSerializer, SerializeAsAny, model_validator
+from socket_handler import SocketHandlerMock
 
+logger = logging.getLogger(__name__)
+
+# Network-wide well-known port.
+KADEMLIA_PORT = 9009
 
 def _b64_decode(v: str | bytes) -> bytes:
     # str   -> from JSON: decode base64 to bytes
@@ -86,8 +92,7 @@ class FindValueReplyPayload(Payload):
     nodes: list[Peer] = Field(default_factory=list)
 
 
-# Registry: msg_type -> payload class. The only place a new MsgType has to
-# register its payload.
+# Registry: msg_type -> payload
 PAYLOAD_TYPES: dict[MsgType, type[Payload]] = {
     MsgType.PING: PingPayload,
     MsgType.PONG: PongPayload,
@@ -99,10 +104,19 @@ PAYLOAD_TYPES: dict[MsgType, type[Payload]] = {
     MsgType.FIND_VALUE_REPLY: FindValueReplyPayload,
 }
 
+# Expected reply msg type for a given request msg type
+REPLY_TYPES: dict[MsgType, MsgType] = {
+    MsgType.PING: MsgType.PONG,
+    MsgType.STORE: MsgType.STORE_REPLY,
+    MsgType.FIND_NODE: MsgType.FIND_NODE_REPLY,
+    MsgType.FIND_VALUE: MsgType.FIND_VALUE_REPLY,
+}
+
 
 class KademliaMsg(BaseModel):
     msg_type: MsgType
     msg_id: B64Bytes = Field(default_factory=lambda: uuid.uuid4().bytes)
+    in_reply_to: B64Bytes | None = None # reference the msg_id of the request
     sender_id: B64Bytes      # node ID = sha256(pubkey)
     sender_pubkey: B64Bytes  # raw public key
     signature: B64Bytes      # this is not generated/ checked yet
@@ -143,3 +157,266 @@ class KademliaMsg(BaseModel):
     @classmethod
     def from_bytes(cls, data: bytes) -> Self:
         return cls.model_validate_json(data)
+
+
+def byte_xor(ba1, ba2):
+    return bytes([_a ^ _b for _a, _b in zip(ba1, ba2)])
+
+@dataclass
+class _Pending:
+    """An outstanding request awaiting its reply."""
+    future: asyncio.Future[KademliaMsg]
+    peer_ip: str
+    reply_type: MsgType
+
+class KademliaNode:
+    """Kademlia RPC engine sitting on top of the SocketHandler queues.
+
+    Reads incoming messages from ``socket.inbox_queue`` as ``(sender_ip, data)``,
+    dispatches by ``msg_type``, and puts replies on ``socket.outbox_queue`` as
+    ``(dest_ip, dest_port, data)``. ``socket`` is anything exposing those two
+    queues (e.g. ``SocketHandlerMock`` for now, the real handler later).
+    """
+
+    def __init__(self, socket: SocketHandlerMock, node_id: bytes, pubkey: bytes, port: int = KADEMLIA_PORT) -> None:
+        self.socket = socket
+        self.node_id = node_id
+        self.pubkey = pubkey
+        self.port = port
+        self.loop = asyncio.get_running_loop()
+        self.peers: list[Peer] = []     # TODO: store this in a more appropriate way
+        self.dht: dict[bytes, Any] = {} # TODO: store this in a more appropriate way
+        # Outstanding requests awaiting a reply, keyed by the request's msg_id.
+        self._pending: dict[bytes, _Pending] = {}
+
+    def get_k_nearest_neighbors(self, target: bytes, k: int = 5) -> list[Peer]:
+        if len(self.peers) <= k:
+            return self.peers
+
+        neighbor_distance_pairs: list[tuple[Peer, bytes]] = [] # (peer, distance)
+        for peer in self.peers:
+            if len(peer.node_id) != len(target):
+                raise ValueError(f"length mismatch of target id ({target.hex()}) and id "
+                                 f"of neighbor ({peer.node_id.hex()})")
+            distance = byte_xor(peer.node_id, target)
+            neighbor_distance_pairs.append((peer, distance))
+
+        # sort by distance
+        neighbor_distance_pairs.sort(key=lambda x: x[1])
+        # return the k-nearest neighbors
+        return [x[0] for x in neighbor_distance_pairs[:k]]
+
+
+    # ---- message plumbing ----------------------------------------------------
+
+    def _new_msg(self, msg_type: MsgType, payload: Payload, in_reply_to: bytes | None = None) -> KademliaMsg:
+        """Wrap a payload into a KademliaMsg signed with our identity."""
+        return KademliaMsg(
+            msg_type=msg_type,
+            in_reply_to=in_reply_to,
+            sender_id=self.node_id,
+            sender_pubkey=self.pubkey,
+            signature=b"dummy-sig",
+            payload=payload,
+        )
+
+    async def _send(self, dest_ip: str, msg: KademliaMsg) -> None:
+        """Fire-and-forget primitive: hand a message to the socket outbox."""
+        await self.socket.outbox_queue.put((dest_ip, KADEMLIA_PORT, msg.to_bytes()))
+
+    async def request(self, dest_ip: str, msg: KademliaMsg, timeout: float = 5.0) -> KademliaMsg:
+        """Send ``msg`` and wait for the reply whose in_reply_to == msg.msg_id.
+
+        Built on top of the fire-and-forget ``_send``: it registers a future
+        before sending, then lets ``recv_loop`` -> ``handle_msg`` resolve it when
+        the matching reply arrives. Raises ``asyncio.TimeoutError`` if no reply
+        comes within ``timeout`` seconds.
+        """
+        fut: asyncio.Future[KademliaMsg] = self.loop.create_future()
+        self._pending[msg.msg_id] = _Pending(fut, dest_ip, REPLY_TYPES[msg.msg_type])
+        try:
+            await self._send(dest_ip, msg)
+            return await asyncio.wait_for(fut, timeout)
+        finally:
+            # Always drop the registration, also on timeout/cancellation.
+            self._pending.pop(msg.msg_id, None)
+
+    # ---- RPCs ----------------------------------------------------------------
+
+    async def ping(self, dest_ip: str, timeout: float = 5.0) -> bool:
+        """Send a PING and wait for the PONG. True if it arrives in time."""
+        msg = self._new_msg(MsgType.PING, PingPayload())
+        try:
+            await self.request(dest_ip, msg, timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    async def pong(self, dest_ip: str, in_reply_to: bytes) -> None:
+        """Fire-and-forget reply to a PING."""
+        await self._send(dest_ip, self._new_msg(MsgType.PONG, PongPayload(), in_reply_to=in_reply_to))
+
+    async def find_node_req(self, dest_ip: str, target: bytes, timeout: float = 5.0) -> list[Peer] | None:
+        """
+        Send a FIND_NODE request and wait for the reply. Returns `list[Peer]` if reply
+        arrives on time, `None` otherwise.
+        """
+        msg = self._new_msg(
+            msg_type=MsgType.FIND_NODE,
+            payload=FindNodePayload(target=target),
+        )
+        try:
+            reply = await self.request(dest_ip, msg, timeout)
+        except asyncio.TimeoutError:
+            return None
+        assert isinstance(reply.payload, FindNodeReplyPayload)
+        return reply.payload.nodes
+
+    async def find_node_reply(self, dest_ip: str, in_reply_to: bytes, target: bytes) -> None:
+        """Fire-and-foreget reply to FIND_NODE"""
+        msg = self._new_msg(
+            msg_type=MsgType.FIND_NODE_REPLY,
+            payload=FindNodeReplyPayload(
+                nodes=self.get_k_nearest_neighbors(target)
+            ),
+            in_reply_to=in_reply_to
+        )
+        await self._send(dest_ip, msg)
+
+    async def find_value_req(self, dest_ip: str, key: bytes, timeout: float = 5.0) -> None | FindValueReplyPayload:
+        """
+        Send a FIND_VALUE request. Returns `None` on timeout, `FindValueReplyPayload` otherwise.
+        """
+        msg = self._new_msg(
+            msg_type=MsgType.FIND_VALUE,
+            payload=FindValuePayload(key=key),
+        )
+        try:
+            reply = await self.request(dest_ip, msg, timeout)
+        except asyncio.TimeoutError:
+            return None
+        assert isinstance(reply.payload, FindValueReplyPayload)
+        return reply.payload
+
+    async def find_value_reply(self, dest_ip: str, in_reply_to: bytes, value: bytes | None = None, neighbors: list[Peer] | None = None) -> None:
+        """Fire-and-forget reply to FIND_VALUE"""
+        if value is None and neighbors is None:
+            raise ValueError("Either value or neighbors must be given as an argument.")
+        if value is not None:
+            payload = FindValueReplyPayload(value=value)
+        else:
+            assert neighbors is not None
+            payload = FindValueReplyPayload(nodes=neighbors)
+
+        msg = self._new_msg(
+            msg_type=MsgType.FIND_VALUE_REPLY,
+            payload=payload,
+            in_reply_to=in_reply_to
+        )
+        await self._send(dest_ip, msg)
+
+    async def store_req(self, dest_ip: str, value: bytes, timeout: float = 5.0) -> bool:
+        """
+        Send a STORE request. Returns `False` on timeout or failure,
+        returns `True` on success.
+        """
+        key = hashlib.sha256(value).digest()
+        msg = self._new_msg(
+            msg_type=MsgType.STORE,
+            payload=StorePayload(key=key, value=value)
+        )
+        try:
+            reply = await self.request(dest_ip, msg, timeout)
+        except asyncio.TimeoutError:
+            return False
+        assert isinstance(reply.payload, StoreReplyPayload)
+        return reply.payload.success
+
+    async def store_reply(self, dest_ip: str, in_reply_to: bytes, success: bool) -> None:
+        """Fire-and-forget reply to STORE"""
+        msg = self._new_msg(
+            msg_type=MsgType.STORE_REPLY,
+            payload=StoreReplyPayload(success=success),
+            in_reply_to=in_reply_to
+        )
+        await self._send(dest_ip, msg)
+
+
+
+    # ---- dispatch ------------------------------------------------------------
+
+    async def handle_msg(self, sender_ip: str, msg: KademliaMsg):
+        # Replies are correlated back to whoever is awaiting their request.
+        if msg.in_reply_to is not None:
+            pending = self._pending.get(msg.in_reply_to)
+            if pending is None:
+                # No one is waiting: late, duplicate, or unsolicited reply.
+                return
+            # A matching msg_id is not enough: the reply must come from the peer
+            # we actually queried and carry the reply type we expect. Otherwise
+            # ignore it and keep waiting (a spoofed/wrong reply must not resolve
+            # the request) until the real one arrives or the request times out.
+            if sender_ip != pending.peer_ip or msg.msg_type is not pending.reply_type:
+                logger.warning(
+                    "Dropping mismatched reply to %s from %s (type=%s; expected %s from %s)",
+                    msg.in_reply_to.hex(), sender_ip, msg.msg_type.value,
+                    pending.reply_type.value, pending.peer_ip,
+                )
+                return
+            if not pending.future.done():
+                pending.future.set_result(msg)
+            return
+
+        # Requests:
+        if msg.msg_type is MsgType.PING:
+            await self.pong(dest_ip=sender_ip, in_reply_to=msg.msg_id)
+        elif msg.msg_type is MsgType.FIND_NODE:
+            assert isinstance(msg.payload, FindNodePayload)
+            await self.find_node_reply(
+                dest_ip=sender_ip,
+                in_reply_to=msg.msg_id,
+                target=msg.payload.target
+            )
+        elif msg.msg_type is MsgType.STORE:
+            assert isinstance(msg.payload, StorePayload)
+            self.dht[msg.payload.key] = msg.payload.value
+            await self.store_reply(
+                dest_ip=sender_ip,
+                in_reply_to=msg.msg_id,
+                success=True
+            )
+        elif msg.msg_type is MsgType.FIND_VALUE:
+            assert isinstance(msg.payload, FindValuePayload)
+            # value exists in local dht => send the value
+            if msg.payload.key in self.dht:
+                await self.find_value_reply(
+                    dest_ip=sender_ip,
+                    in_reply_to=msg.msg_id,
+                    value=self.dht[msg.payload.key]
+                )
+            # value doesn't exist in local dht => send k-nearest neigbors
+            else:
+                await self.find_value_reply(
+                    dest_ip=sender_ip,
+                    in_reply_to=msg.msg_id,
+                    neighbors=self.get_k_nearest_neighbors(msg.payload.key)
+                )
+
+
+
+    async def recv_loop(self):
+        while True:
+            sender_ip, raw_msg = await self.socket.inbox_queue.get()
+            try:
+                parsed = KademliaMsg.from_bytes(raw_msg)
+            except ValueError as e:
+                # Malformed / unverifiable message (bad JSON,
+                # payload/type mismatch, ...). Drop it and keep serving.
+                logger.warning("Discarding invalid message from %s: %s", sender_ip, e)
+                continue
+            logger.debug("Received %s from %s", parsed.msg_type.value, sender_ip)
+            await self.handle_msg(sender_ip, parsed)
+
+    async def run(self):
+        logger.info("Kademlia node %s listening on port %d", self.node_id.hex()[:8], self.port)
+        await self.recv_loop()
