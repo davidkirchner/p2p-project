@@ -196,9 +196,6 @@ async def input_loop(handle_input: Callable[[str], None | Awaitable[None]]):
 
 
 async def main() -> None:
-    import dotenv
-    # TODO: ideally, the corrent env file is passed in during program invocation. Right now dev.env is hard coded. Please provide one for customization if needed
-    dotenv.load_dotenv("dev.env")
     events = asyncio.Queue()
     config = Config.from_env()
     database = await SqliteDatabase.create(config.sqlite_path)
