@@ -105,7 +105,7 @@ class SimpleTerminalUI:
             "text/plain"
         ))
 
-        msg = await self.database.create_message( 
+        msg = await self.database.Message.create( 
             chat=self.current_chat, 
             sender=self.user, 
             content=input.strip().encode("utf-8"), 
@@ -209,10 +209,10 @@ async def main() -> None:
         alice = await database.User.by_id("user/alice")
         chat_id = (await alice.chats())[0]
     except KeyError:
-        alice = await database.create_user("Alice")
-        bob = await database.create_user("Bob")
-        chat = await database.create_chat("TEst chat", participants=[alice.id, bob.id])
-        message = await database.create_message(chat.id, bob.id, b"whatsup")
+        alice = await database.User.create("Alice")
+        bob = await database.User.create("Bob")
+        chat = await database.Chat.create("TEst chat", participants=[alice.id, bob.id])
+        message = await database.Message.create(chat.id, bob.id, b"whatsup")
         chat_id = chat.id
     
     # this context manager automatically does necessary resource management
