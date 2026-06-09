@@ -11,6 +11,7 @@ from typing import Awaitable, Callable, List, Self
 import asyncio
 import argparse
 
+from closable import Closable
 from config import Config
 from db.sqlite_impl import SqliteDatabase
 from models import *
@@ -33,8 +34,9 @@ class ExecuteCommand(ChatContext):
     args: list[str]
 
 
-class SimpleTerminalUI:
+class SimpleTerminalUI(Closable):
     def __init__(self, database: Storage, incoming_events: asyncio.Queue, outgoing_events: asyncio.Queue, user: UserID | None = None, current_chat: ChatID | None = None):
+        Closable.__init__(self)
         self.database = database
         self.incoming_events = incoming_events
         self.outgoing_events = outgoing_events
@@ -42,8 +44,6 @@ class SimpleTerminalUI:
         self.user = user
         
         self.exit_event = asyncio.Event()
-        
-        self._bound_tasks = {}
         
     @classmethod
     async def create_and_start(cls, database: Storage, incoming_events: asyncio.Queue, user: UserID | None = None, current_chat: ChatID | None = None) -> Self:
@@ -54,29 +54,10 @@ class SimpleTerminalUI:
             user=user,
             current_chat=current_chat
         )
-        ui._bind_task(asyncio.create_task(input_loop(ui._handle_raw_input)), "input_loop")
-        ui._bind_task(asyncio.create_task(ui._handle_incoming_message_loop()), "handle_incoming_message_loop")
+        ui.bind_closable(input_loop(ui._handle_raw_input))
+        ui.bind_closable(ui._handle_incoming_message_loop())
         await ui.display_chat(None)
         return ui
-    
-    def _bind_task(self, task: asyncio.Task, name: str | asyncio.Task | None = None):
-        if name is None:
-            name = task
-            
-        if name in self._bound_tasks:
-            old_task = self._bound_tasks.pop(name)
-            old_task.cancel()
-        
-        self._bound_tasks[name] = task
-        
-        def remove(t):
-            current_task = self._bound_tasks.get(name, None)
-            if current_task is None:
-                return
-            if current_task == t:
-                del self._bound_tasks[name]
-                
-        task.add_done_callback(remove)
     
     async def _handle_raw_input(self, input: str):
         if input.startswith(" "):
@@ -117,7 +98,7 @@ class SimpleTerminalUI:
     async def _handle_incoming_message_loop(self):
         while True:
             res = await self.incoming_events.get()
-            self._bind_task(asyncio.create_task(self._handle_incoming_message(res)))
+            self.bind_closable(self._handle_incoming_message(res))
         
     async def _handle_incoming_message(self, message):
         pass # TODO: implement handling of incoming messages from the rest of the system.
@@ -169,22 +150,6 @@ class SimpleTerminalUI:
         
     def _print_start_screen(self):
         print("Hello there! Welcome to chat")
-        
-    async def close(self):
-        for task in list(self._bound_tasks.values()):
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            
-    async def __aenter__(self) -> Self:
-        return self
-    
-    async def __aexit__(self, *args):
-        await self.close()
-        return True
-        
 
 
 async def input_loop(handle_input: Callable[[str], None | Awaitable[None]]):

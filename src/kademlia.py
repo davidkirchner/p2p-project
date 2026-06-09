@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Annotated, Any, Self
 from pydantic import BaseModel, Field, BeforeValidator, PlainSerializer, SerializeAsAny, model_validator
+from closable import Closable
 from socket_handler import SocketHandlerMock
 
 logger = logging.getLogger(__name__)
@@ -169,7 +170,7 @@ class _Pending:
     peer_ip: str
     reply_type: MsgType
 
-class KademliaNode:
+class KademliaNode(Closable):
     """Kademlia RPC engine sitting on top of the SocketHandler queues.
 
     Reads incoming messages from ``socket.inbox_queue`` as ``(sender_ip, data)``,
@@ -402,8 +403,6 @@ class KademliaNode:
                     neighbors=self.get_k_nearest_neighbors(msg.payload.key)
                 )
 
-
-
     async def recv_loop(self):
         while True:
             sender_ip, raw_msg = await self.socket.inbox_queue.get()
@@ -419,4 +418,4 @@ class KademliaNode:
 
     async def run(self):
         logger.info("Kademlia node %s listening on port %d", self.node_id.hex()[:8], self.port)
-        await self.recv_loop()
+        self.bind_named_closable(self.recv_loop(), "_recv_loop")
