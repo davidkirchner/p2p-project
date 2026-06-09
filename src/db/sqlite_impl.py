@@ -69,8 +69,8 @@ class SqliteDatabase(m.Storage):
             private_identity: bytes | None
 
             @classmethod
-            async def create(cls, name: str, public_identity: bytes = b"", private_identity: bytes = b"") -> "User":
-                user_id = m.UserID(uuid.uuid4())
+            async def create(cls, id: m.KademliaKey, name: str, public_identity: bytes = b"", private_identity: bytes = b"") -> "User":
+                user_id = m.UserID(id)
                 connection.execute(
                     "INSERT INTO user (id, name, public_identity, private_identity) VALUES (?, ?, ?, ?)",
                     (str(user_id), name, public_identity, private_identity),
@@ -87,7 +87,7 @@ class SqliteDatabase(m.Storage):
                 if row is None:
                     raise KeyError(f"User with id {id} not found")
                 return cls(
-                    id=m.UserID(uuid.UUID(row[0])),
+                    id=m.UserID(row[0]),
                     name=row[1],
                     public_identity=row[2] or b"",
                     private_identity=row[3] or b"",
@@ -156,7 +156,7 @@ class SqliteDatabase(m.Storage):
                     "SELECT user_id FROM chat_participant WHERE chat_id = ?",
                     (str(id),)
                 ).fetchall()
-                participants = [m.UserID(uuid.UUID(r[0])) for r in participant_rows]
+                participants = [m.UserID(r[0]) for r in participant_rows]
                 return cls(
                     id=m.ChatID(uuid.UUID(row[0])),
                     title=row[1] or "",
@@ -238,7 +238,7 @@ class SqliteDatabase(m.Storage):
                 return cls(
                     id=m.MessageID(uuid.UUID(row[0])),
                     chat=m.ChatID(uuid.UUID(row[1])),
-                    sender=m.UserID(uuid.UUID(row[2])),
+                    sender=m.UserID(row[2]),
                     timestamp=datetime.fromisoformat(row[3]),
                     content=row[4],
                     content_type=row[5],

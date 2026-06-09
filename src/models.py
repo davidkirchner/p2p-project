@@ -6,7 +6,11 @@ import uuid
 from datetime import datetime
 
 
-UserID = NewType("UserID", uuid.UUID)
+
+KademliaKey = NewType("KademliaKey", bytes)
+
+
+UserID = NewType("UserID", KademliaKey)
 ChatID = NewType("ChatID", uuid.UUID)
 MessageID = NewType("MessageID", uuid.UUID)
 
