@@ -20,8 +20,8 @@ async def main():
     config = Config.from_env()
     database = await SqliteDatabase.create(config.sqlite_path)
     ui = None
-    
-    
+
+
     # create some example user to play with
     # bob actually never responds
     # TODO: implement actual user creation and stuff over the prompt line
@@ -34,7 +34,7 @@ async def main():
         chat = await database.Chat.create("TEst chat", participants=[alice.id, bob.id])
         message = await database.Message.create(chat.id, bob.id, b"whatsup")
         chat_id = chat.id
-    
+
     # this context manager automatically does necessary resource management
     async with await SimpleTerminalUI.create_and_start(database=database, incoming_events=events, user=alice.id) as ui:
         await ui.display_chat(chat_id)
