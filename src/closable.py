@@ -62,7 +62,7 @@ class Closable:
         self._bound_named_closables: dict[str, ClosableCompatible] = {}
         self._closing_tasks = set()
 
-    def bind_named_closable(self, key, value: ClosableCompatible):
+    def bind_named_closable(self, key: str, value: ClosableCompatible):
         # Schedule bare awaitables so they actually run, mirroring bind_closable.
         if isawaitable(value) and not isinstance(value, asyncio.Task):
             value = asyncio.create_task(value) # type: ignore

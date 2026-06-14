@@ -26,7 +26,17 @@ from kademlia import (
     FindValueReplyPayload,
     _Pending,
 )
-from socket_handler import SocketHandlerMock
+
+# Queue item shapes, mirroring the real SocketHandler contract.
+InboxItem = tuple[str, bytes]          # (sender_ip, data)
+OutboxItem = tuple[str, int, bytes]    # (dest_ip, dest_port, data)
+
+class SocketHandlerMock:
+    """Stand-in for the real SocketHandler's queue interface."""
+
+    def __init__(self) -> None:
+        self.inbox_queue: asyncio.Queue[InboxItem] = asyncio.Queue()
+        self.outbox_queue: asyncio.Queue[OutboxItem] = asyncio.Queue()
 
 # Schlüsselpaar erzeugen
 priv = Ed25519PrivateKey.generate()

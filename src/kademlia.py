@@ -4,7 +4,7 @@ from enum import Enum
 from typing import Annotated, Any, Self
 from pydantic import BaseModel, Field, BeforeValidator, PlainSerializer, SerializeAsAny, model_validator
 from closable import Closable
-from socket_handler import SocketHandlerMock
+from socket_handler import SocketHandler
 
 logger = logging.getLogger(__name__)
 
@@ -175,11 +175,10 @@ class KademliaNode(Closable):
 
     Reads incoming messages from ``socket.inbox_queue`` as ``(sender_ip, data)``,
     dispatches by ``msg_type``, and puts replies on ``socket.outbox_queue`` as
-    ``(dest_ip, dest_port, data)``. ``socket`` is anything exposing those two
-    queues (e.g. ``SocketHandlerMock`` for now, the real handler later).
+    ``(dest_ip, dest_port, data)``.
     """
 
-    def __init__(self, socket: SocketHandlerMock, node_id: bytes, pubkey: bytes, port: int = KADEMLIA_PORT) -> None:
+    def __init__(self, socket: SocketHandler, node_id: bytes, pubkey: bytes, port: int = KADEMLIA_PORT) -> None:
         super().__init__()
         self.socket = socket
         self.node_id = node_id
