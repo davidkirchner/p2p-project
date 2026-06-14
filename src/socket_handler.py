@@ -1,7 +1,10 @@
 import asyncio
+import logging
 import struct
 from asyncio import StreamReader, StreamWriter
 from closable import Closable
+
+logger = logging.getLogger(__name__)
 
 class SocketHandler(Closable):
     def __init__(self) -> None:
@@ -13,7 +16,7 @@ class SocketHandler(Closable):
         while True:
             ip, port, data = await self.outbox_queue.get()
 
-            print(f"Sending to {ip}:{port}")
+            logger.debug("Sending to %s:%s", ip, port)
 
             try:
                 reader, writer = await asyncio.open_connection(
@@ -26,7 +29,7 @@ class SocketHandler(Closable):
                 writer.close()
                 await writer.wait_closed()
             except Exception as exc:
-                print(f"Failed to send to {ip}:{port}: {exc!r}")
+                logger.warning("Failed to send to %s:%s: %r", ip, port, exc)
 
     async def _send_message(self, writer: StreamWriter, data: bytes):
         message_len = len(data)
@@ -44,9 +47,10 @@ class SocketHandler(Closable):
 
     async def _handle_client(self, reader: StreamReader, writer: StreamWriter):
         src_ip, src_port = writer.get_extra_info("peername")
-        print(f"Connected with {src_ip}:{src_port}")
+        logger.debug("Connected with %s:%s", src_ip, src_port)
         try:
             data = await self._read_message(reader)
+            logger.debug("Received %d bytes from %s:%s", len(data), src_ip, src_port)
             await self.inbox_queue.put(
                 (
                     src_ip,
@@ -54,7 +58,7 @@ class SocketHandler(Closable):
                 )
             )
         except (asyncio.IncompleteReadError, ConnectionError) as exc:
-            print(f"Failed to read from {src_ip}:{src_port}: {exc!r}")
+            logger.warning("Failed to read from %s:%s: %r", src_ip, src_port, exc)
         finally:
             writer.close()
             await writer.wait_closed()
@@ -73,7 +77,7 @@ class SocketHandler(Closable):
             host=host,
             port=port,
         )
-        print(f"Server listening on {host}:{port}")
+        logger.info("Server listening on %s:%s", host, port)
 
         self.bind_named_closable(self._send_loop.__name__, self._send_loop())
         self.bind_named_closable(self._serve.__name__, self._serve(server))
