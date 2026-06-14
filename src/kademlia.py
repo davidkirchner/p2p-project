@@ -180,6 +180,7 @@ class KademliaNode(Closable):
     """
 
     def __init__(self, socket: SocketHandlerMock, node_id: bytes, pubkey: bytes, port: int = KADEMLIA_PORT) -> None:
+        super().__init__()
         self.socket = socket
         self.node_id = node_id
         self.pubkey = pubkey
@@ -418,4 +419,4 @@ class KademliaNode(Closable):
 
     async def run(self):
         logger.info("Kademlia node %s listening on port %d", self.node_id.hex()[:8], self.port)
-        self.bind_named_closable(self.recv_loop(), "_recv_loop")
+        self.bind_named_closable("recv_loop", asyncio.create_task(self.recv_loop()))

@@ -446,6 +446,30 @@ class TestKademliaNode:
             assert reply.msg_type is MsgType.PONG
             assert reply.in_reply_to == req.msg_id
 
+    # ---- run() / close() lifecycle ------------------------------------------
+
+    async def test_run_starts_recv_loop_and_serves(self, node: KademliaNode):
+        # run() must actually start the recv_loop: a request put on the inbox
+        # gets answered without us driving recv_loop() ourselves.
+        await node.run()
+        try:
+            req = make_msg(MsgType.PING, PingPayload())
+            await node.socket.inbox_queue.put(("203.0.113.5", req.to_bytes()))
+
+            _, _, reply = await get_reply(node)
+            assert reply.msg_type is MsgType.PONG
+            assert reply.in_reply_to == req.msg_id
+        finally:
+            await node.close()
+
+    async def test_close_cancels_recv_loop(self, node: KademliaNode):
+        # close() must tear the background recv_loop down.
+        await node.run()
+        assert not node.recv_loop.done()
+
+        await node.close()
+        assert node.recv_loop.done()
+
     # ---- end-to-end: two real nodes over a fake network ---------------------
 
     async def test_e2e_ping_succeeds(self, network: FakeNetwork):
