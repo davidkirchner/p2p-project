@@ -465,10 +465,11 @@ class TestKademliaNode:
     async def test_close_cancels_recv_loop(self, node: KademliaNode):
         # close() must tear the background recv_loop down.
         await node.run()
-        assert not node.recv_loop.done()
+        recv_task = node.get_named_closable(KademliaNode.recv_loop.__name__)
+        assert isinstance(recv_task, asyncio.Task) and not recv_task.done()
 
         await node.close()
-        assert node.recv_loop.done()
+        assert recv_task.done()
 
     # ---- end-to-end: two real nodes over a fake network ---------------------
 

@@ -419,4 +419,4 @@ class KademliaNode(Closable):
 
     async def run(self):
         logger.info("Kademlia node %s listening on port %d", self.node_id.hex()[:8], self.port)
-        self.bind_named_closable("recv_loop", asyncio.create_task(self.recv_loop()))
+        self.bind_named_closable(self.recv_loop.__name__, asyncio.create_task(self.recv_loop()))
