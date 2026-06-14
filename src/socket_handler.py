@@ -16,22 +16,26 @@ class SocketHandler(Closable):
         while True:
             ip, port, data = await self.outbox_queue.get()
 
-            logger.debug("Sending to %s:%s", ip, port)
+            # Dispatch each send as its own task so multiple messages can be
+            # sent concurrently instead of blocking the loop on each connect/send.
+            self.bind_closable(asyncio.create_task(self._connect_and_send(ip, port, data)))
 
-            try:
-                reader, writer = await asyncio.open_connection(
-                    ip,
-                    port,
-                )
+    async def _connect_and_send(self, ip, port, data: bytes):
+        logger.debug("Sending to %s:%s", ip, port)
 
-                await self._send_message(writer, data)
-                await writer.drain()
-                writer.close()
-                await writer.wait_closed()
-            except Exception as exc:
-                logger.warning("Failed to send to %s:%s: %r", ip, port, exc)
+        try:
+            reader, writer = await asyncio.open_connection(
+                ip,
+                port,
+            )
+            await self._write_message(writer, data)
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+        except Exception as exc:
+            logger.warning("Failed to send to %s:%s: %r", ip, port, exc)
 
-    async def _send_message(self, writer: StreamWriter, data: bytes):
+    async def _write_message(self, writer: StreamWriter, data: bytes):
         message_len = len(data)
         header = struct.pack("!I",message_len)
         writer.write(header + data)

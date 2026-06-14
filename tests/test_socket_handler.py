@@ -53,7 +53,7 @@ def test_starts_with_empty_queues(handler: SocketHandler):
 async def test_send_message_writes_length_prefixed_frame(handler: SocketHandler):
     writer = _mock_writer()
 
-    await handler._send_message(writer, b"hello")
+    await handler._write_message(writer, b"hello")
 
     expected = struct.pack("!I", len(b"hello")) + b"hello"
     writer.write.assert_called_once_with(expected)
@@ -63,7 +63,7 @@ async def test_send_message_writes_length_prefixed_frame(handler: SocketHandler)
 async def test_send_message_handles_empty_payload(handler: SocketHandler):
     writer = _mock_writer()
 
-    await handler._send_message(writer, b"")
+    await handler._write_message(writer, b"")
 
     writer.write.assert_called_once_with(struct.pack("!I", 0))
 
@@ -113,7 +113,7 @@ async def test_send_then_read_roundtrip(handler: SocketHandler):
     writer.write.side_effect = chunks.append
 
     payload = b"round-trip payload \x00\xff"
-    await handler._send_message(writer, payload)
+    await handler._write_message(writer, payload)
 
     reader = _reader_with(b"".join(chunks))
     assert await handler._read_message(reader) == payload
