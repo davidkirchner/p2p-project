@@ -40,6 +40,8 @@ class MsgType(str, Enum):
     FIND_NODE_REPLY = "FIND_NODE_REPLY"
     FIND_VALUE = "FIND_VALUE"
     FIND_VALUE_REPLY = "FIND_VALUE_REPLY"
+    CHAT_MSG = "CHAT_MSG"
+    CHAT_MSG_REPLY = "CHAT_MSG_REPLY" 
 
 
 class Peer(BaseModel):
@@ -92,6 +94,13 @@ class FindValueReplyPayload(Payload):
     # ... or the k closest contacts are returned.
     nodes: list[Peer] = Field(default_factory=list)
 
+class ChatMsgPayload(Payload):
+    message: str
+
+
+class ChatMsgReplyPayload(Payload):
+    success: bool
+
 
 # Registry: msg_type -> payload
 PAYLOAD_TYPES: dict[MsgType, type[Payload]] = {
@@ -103,6 +112,8 @@ PAYLOAD_TYPES: dict[MsgType, type[Payload]] = {
     MsgType.FIND_NODE_REPLY: FindNodeReplyPayload,
     MsgType.FIND_VALUE: FindValuePayload,
     MsgType.FIND_VALUE_REPLY: FindValueReplyPayload,
+    MsgType.CHAT_MSG: ChatMsgPayload,
+    MsgType.CHAT_MSG_REPLY: ChatMsgReplyPayload,
 }
 
 # Expected reply msg type for a given request msg type
@@ -111,6 +122,7 @@ REPLY_TYPES: dict[MsgType, MsgType] = {
     MsgType.STORE: MsgType.STORE_REPLY,
     MsgType.FIND_NODE: MsgType.FIND_NODE_REPLY,
     MsgType.FIND_VALUE: MsgType.FIND_VALUE_REPLY,
+    MsgType.CHAT_MSG: MsgType.CHAT_MSG_REPLY,
 }
 
 
@@ -217,7 +229,7 @@ class KademliaNode(Closable):
             in_reply_to=in_reply_to,
             sender_id=self.node_id,
             sender_pubkey=self.pubkey,
-            signature=b"dummy-sig",
+            signature=b"dummy-sig",   #add implementation
             payload=payload,
         )
 
@@ -342,6 +354,34 @@ class KademliaNode(Closable):
         )
         await self._send(dest_ip, msg)
 
+    async def chat_msg_req(self,dest_ip: str,message: bytes,timeout: float = 5.0) -> bool:
+        """
+        Sends an application level CHAT MESSAGE. Returns 'True' if the recipient acknowledges it before timeout,
+        'False' otherwise
+        """
+        msg = self._new_msg(
+            msg_type=MsgType.CHAT_MSG,
+            payload=ChatMsgPayload(message=message),
+        )
+
+        try:
+            reply = await self.request(dest_ip,msg,timeout)
+        except asyncio.TimeoutError:
+            return False
+        
+        assert isinstance(reply.payload, ChatMsgReplyPayload)
+        return reply.payload.success
+    
+    async def chat_msg_reply(self, dest_ip: str, in_reply_to: bytes, success: bool) -> None :
+        """
+        Fire-and-forget reply to CHAT_MSG
+        """
+        msg = self._new_msg(
+            msg_type=MsgType.CHAT_MSG_REPLY,
+            payload=ChatMsgReplyPayload(success = success),
+            in_reply_to = in_reply_to
+        )
+        await self._send(dest_ip,msg)
 
 
     # ---- dispatch ------------------------------------------------------------
@@ -402,6 +442,20 @@ class KademliaNode(Closable):
                     in_reply_to=msg.msg_id,
                     neighbors=self.get_k_nearest_neighbors(msg.payload.key)
                 )
+        elif msg.msg_type is MsgType.CHAT_MSG:
+            assert isinstance(msg.payload, ChatMsgPayload)
+            # TODO: Forward the message to the application/UI layer.
+            logger.debug(
+                "Received chat message from %s: %s",
+                sender_ip,
+                msg.payload.message
+            )
+            await self.chat_msg_reply(
+                dest_ip=sender_ip,
+                in_reply_to=msg.msg_id,
+                success=True
+            )
+
 
     async def recv_loop(self):
         while True:
