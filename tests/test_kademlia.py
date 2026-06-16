@@ -26,17 +26,11 @@ from kademlia import (
     FindValueReplyPayload,
     _Pending,
 )
+from socket_handler import SocketHandler
 
-# Queue item shapes, mirroring the real SocketHandler contract.
-InboxItem = tuple[str, bytes]          # (sender_ip, data)
-OutboxItem = tuple[str, int, bytes]    # (dest_ip, dest_port, data)
-
-class SocketHandlerMock:
-    """Stand-in for the real SocketHandler's queue interface."""
-
-    def __init__(self) -> None:
-        self.inbox_queue: asyncio.Queue[InboxItem] = asyncio.Queue()
-        self.outbox_queue: asyncio.Queue[OutboxItem] = asyncio.Queue()
+# The tests drive a node purely through the SocketHandler's two queues and never
+# start its networking, so the real SocketHandler can be used as-is: instantiating
+# it only sets up the (empty) inbox/outbox queues, without binding any socket.
 
 # Schlüsselpaar erzeugen
 priv = Ed25519PrivateKey.generate()
@@ -140,7 +134,7 @@ def test_binary_signature_roundtrip():
 # KademliaNode tests
 # =============================================================================
 #
-# Test helpers. A node is built around a SocketHandlerMock and talks to the
+# Test helpers. A node is built around a SocketHandler and talks to the
 # outside world *only* through its two queues:
 #
 #   inbox_queue   -> (sender_ip, raw_bytes)        # things to handle
@@ -167,7 +161,7 @@ def build_node(*, port: int = KADEMLIA_PORT) -> KademliaNode:
     loop in __init__).
     """
     node_id, pubkey = new_identity()
-    return KademliaNode(SocketHandlerMock(), node_id, pubkey, port=port)
+    return KademliaNode(SocketHandler(), node_id, pubkey, port=port)
 
 
 async def get_outbox(node: KademliaNode, timeout: float = 1.0):
