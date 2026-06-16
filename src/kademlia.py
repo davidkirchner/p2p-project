@@ -1,7 +1,7 @@
 import uuid, base64, hashlib, logging, asyncio
 from dataclasses import dataclass
 from enum import Enum
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Literal, Self
 from pydantic import BaseModel, Field, BeforeValidator, PlainSerializer, SerializeAsAny, model_validator
 from closable import Closable
 from socket_handler import SocketHandler
@@ -95,7 +95,8 @@ class FindValueReplyPayload(Payload):
     nodes: list[Peer] = Field(default_factory=list)
 
 class ChatMsgPayload(Payload):
-    message: str
+    message: bytes
+    content_type: Literal["text/plain"]
 
 
 class ChatMsgReplyPayload(Payload):
@@ -354,14 +355,19 @@ class KademliaNode(Closable):
         )
         await self._send(dest_ip, msg)
 
-    async def chat_msg_req(self,dest_ip: str,message: bytes,timeout: float = 5.0) -> bool:
+    async def chat_msg_req(self, dest_ip: str, message: bytes,
+                           content_type: Literal["text/plain"],
+                           timeout: float = 5.0) -> bool:
         """
         Sends an application level CHAT MESSAGE. Returns 'True' if the recipient acknowledges it before timeout,
         'False' otherwise
         """
         msg = self._new_msg(
             msg_type=MsgType.CHAT_MSG,
-            payload=ChatMsgPayload(message=message),
+            payload=ChatMsgPayload(
+                message=message,
+                content_type=content_type
+            ),
         )
 
         try:
