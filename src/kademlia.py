@@ -1,7 +1,7 @@
 import uuid, base64, hashlib, logging, asyncio
 from dataclasses import dataclass
 from enum import Enum
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Callable, Literal, Self
 from pydantic import BaseModel, Field, BeforeValidator, PlainSerializer, SerializeAsAny, model_validator
 from closable import Closable
 from socket_handler import SocketHandler
@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 # Network-wide well-known port.
 KADEMLIA_PORT = 9009
+ID_SPACE = 256 # bit
 
 def _b64_decode(v: str | bytes) -> bytes:
     # str   -> from JSON: decode base64 to bytes
@@ -41,11 +42,11 @@ class MsgType(str, Enum):
     FIND_VALUE = "FIND_VALUE"
     FIND_VALUE_REPLY = "FIND_VALUE_REPLY"
     CHAT_MSG = "CHAT_MSG"
-    CHAT_MSG_REPLY = "CHAT_MSG_REPLY" 
+    CHAT_MSG_REPLY = "CHAT_MSG_REPLY"
 
 
 class Peer(BaseModel):
-    node_id: B64Bytes
+    id: B64Bytes
     ip: str
 
 
@@ -173,8 +174,104 @@ class KademliaMsg(BaseModel):
         return cls.model_validate_json(data)
 
 
-def byte_xor(ba1, ba2):
-    return bytes([_a ^ _b for _a, _b in zip(ba1, ba2)])
+def byte_xor(a: bytes, b: bytes) -> bytes:
+    return bytes([_a ^ _b for _a, _b in zip(a, b)])
+
+@dataclass
+class Contact:
+    ip: str
+    fail_counter: int = 0
+
+type OnNeedsPing = Callable[[str], None]
+
+class Buckets:
+    def __init__(self, node_id: bytes, on_needs_ping: OnNeedsPing, k=10) -> None:
+        self.node_id = node_id
+        self.on_needs_ping = on_needs_ping
+        self.k = k
+        self.failure_remove_threshold = 3
+        self.buckets: dict[int, dict[bytes, Contact]] = {}
+        self.candidate_cache: dict[int, dict[bytes, Contact]] = {}
+        for i in range(ID_SPACE):
+            self.buckets[i] = {}
+            self.candidate_cache[i] = {}
+
+    def _determine_bucket(self, peer_id: bytes) -> int:
+        distance = int.from_bytes(byte_xor(self.node_id, peer_id))
+        if distance == 0:
+            raise ValueError(f"Peer-id {peer_id!r} is identical to our own node_id")
+        return distance.bit_length() - 1
+
+    def _bucket_for(self, peer_id: bytes) -> dict[bytes, Contact]:
+        return self.buckets[self._determine_bucket(peer_id)]
+
+    def _cache_for(self, peer_id: bytes) -> dict[bytes, Contact]:
+        return self.candidate_cache[self._determine_bucket(peer_id)]
+
+    def _remove_oldest_dict_entry(self, d: dict) -> None:
+        if not d:
+            return
+        del d[next(iter(d))] # first entry is the oldest
+
+    def _move_dict_entry_to_tail(self, d: dict, key: Any) -> None:
+        '''Raises KeyError when key does not exist'''
+        d[key] = d.pop(key)
+
+
+    def _add_peer(self, peer_id: bytes, peer_ip: str) -> None:
+        bucket = self._bucket_for(peer_id)
+        if len(bucket) >= self.k:
+            raise RuntimeError(f"Bucket for peer {peer_id!r} reached maximum entries")
+        bucket[peer_id] = Contact(ip=peer_ip)
+
+    def _cache_peer(self, peer_id: bytes, peer_ip: str) -> None:
+        cache = self._cache_for(peer_id)
+        if peer_id in cache:
+            self._move_dict_entry_to_tail(cache, peer_id)
+            return
+        if len(cache) >= self.k:
+            self._remove_oldest_dict_entry(cache)
+        cache[peer_id] = Contact(ip=peer_ip)
+
+    def _get_latest_candidate(self, peer_id: bytes) -> tuple[bytes, Contact] | None:
+        cache = self._cache_for(peer_id)
+        if not cache:
+            return None
+        return cache.popitem()
+
+    def _mark_alive(self, peer_id: bytes) -> None:
+        bucket = self._bucket_for(peer_id)
+        try:
+            self._move_dict_entry_to_tail(bucket, peer_id)
+        except KeyError:
+            raise ValueError(f"Peer-id {peer_id!r} is not present in its bucket")
+        bucket[peer_id].fail_counter = 0
+
+    def register_failure(self, peer_id: bytes) -> None:
+        bucket = self._bucket_for(peer_id)
+        if peer_id not in bucket:
+            return
+        bucket[peer_id].fail_counter += 1
+
+        if bucket[peer_id].fail_counter >= self.failure_remove_threshold:
+            bucket.pop(peer_id)
+            # If there is a candidate  peer in the waiting list, ping it so it will be
+            # promoted on the received pong.
+            if (candidate := self._get_latest_candidate(peer_id)):
+                self.on_needs_ping(candidate[1].ip)
+
+    def register_successful_contact(self, peer_id: bytes, peer_ip: str):
+        bucket = self._bucket_for(peer_id)
+
+        if peer_id in bucket:
+            self._mark_alive(peer_id)
+        elif len(bucket) < self.k:
+            self._add_peer(peer_id, peer_ip)
+            self._cache_for(peer_id).pop(peer_id, None)
+        else:
+            self._cache_peer(peer_id, peer_ip)
+
+
 
 @dataclass
 class _Pending:
@@ -197,6 +294,7 @@ class KademliaNode(Closable):
         self.node_id = node_id
         self.pubkey = pubkey
         self.port = port
+        self.buckets = Buckets(node_id, self._fire_ping)
         self.loop = asyncio.get_running_loop()
         self.peers: list[Peer] = []     # TODO: store this in a more appropriate way
         self.dht: dict[bytes, Any] = {} # TODO: store this in a more appropriate way
@@ -209,10 +307,10 @@ class KademliaNode(Closable):
 
         neighbor_distance_pairs: list[tuple[Peer, bytes]] = [] # (peer, distance)
         for peer in self.peers:
-            if len(peer.node_id) != len(target):
+            if len(peer.id) != len(target):
                 raise ValueError(f"length mismatch of target id ({target.hex()}) and id "
-                                 f"of neighbor ({peer.node_id.hex()})")
-            distance = byte_xor(peer.node_id, target)
+                                 f"of neighbor ({peer.id.hex()})")
+            distance = byte_xor(peer.id, target)
             neighbor_distance_pairs.append((peer, distance))
 
         # sort by distance
@@ -251,6 +349,9 @@ class KademliaNode(Closable):
         try:
             await self._send(dest_ip, msg)
             return await asyncio.wait_for(fut, timeout)
+        except TimeoutError as e:
+            # TODO: register failure in buckets
+            raise e
         finally:
             # Always drop the registration, also on timeout/cancellation.
             self._pending.pop(msg.msg_id, None)
@@ -269,6 +370,13 @@ class KademliaNode(Closable):
     async def pong(self, dest_ip: str, in_reply_to: bytes) -> None:
         """Fire-and-forget reply to a PING."""
         await self._send(dest_ip, self._new_msg(MsgType.PONG, PongPayload(), in_reply_to=in_reply_to))
+
+    def _fire_ping(self, dest_ip: str) -> None:
+        """
+        Sync callback for the asyncio-free ``Buckets``. ``Buckets`` calls
+        this function when it needs to verify a peer's liveness.
+        """
+        self.bind_closable(self.ping(dest_ip=dest_ip))
 
     async def find_node_req(self, dest_ip: str, target: bytes, timeout: float = 5.0) -> list[Peer] | None:
         """
@@ -374,10 +482,10 @@ class KademliaNode(Closable):
             reply = await self.request(dest_ip,msg,timeout)
         except asyncio.TimeoutError:
             return False
-        
+
         assert isinstance(reply.payload, ChatMsgReplyPayload)
         return reply.payload.success
-    
+
     async def chat_msg_reply(self, dest_ip: str, in_reply_to: bytes, success: bool) -> None :
         """
         Fire-and-forget reply to CHAT_MSG

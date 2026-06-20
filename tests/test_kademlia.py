@@ -99,7 +99,7 @@ def test_payload_type_must_match_msg_type():
         (
             MsgType.FIND_NODE_REPLY,
             FindNodeReplyPayload(
-                nodes=[Peer(node_id=os.urandom(32), ip="10.0.0.1")]
+                nodes=[Peer(id=os.urandom(32), ip="10.0.0.1")]
             ),
         ),
         (MsgType.FIND_VALUE, FindValuePayload(key=os.urandom(32))),
@@ -110,7 +110,7 @@ def test_payload_type_must_match_msg_type():
         (
             MsgType.FIND_VALUE_REPLY,
             FindValueReplyPayload(
-                nodes=[Peer(node_id=os.urandom(32), ip="10.0.0.2")]
+                nodes=[Peer(id=os.urandom(32), ip="10.0.0.2")]
             ),
         ),
     ],
@@ -243,7 +243,7 @@ class TestKademliaNode:
     # ---- get_k_nearest_neighbors --------------------------------------------
 
     async def test_knn_returns_all_when_not_more_than_k(self, node: KademliaNode):
-        peers = [Peer(node_id=os.urandom(32), ip=f"10.0.0.{i}") for i in range(3)]
+        peers = [Peer(id=os.urandom(32), ip=f"10.0.0.{i}") for i in range(3)]
         node.peers = peers
         # 3 peers, k=5 -> all of them, untouched.
         assert node.get_k_nearest_neighbors(os.urandom(32), k=5) == peers
@@ -254,21 +254,21 @@ class TestKademliaNode:
         target = bytes(32)
         ids = [5, 3, 9, 1, 7, 2]
         node.peers = [
-            Peer(node_id=bytes([i]) + bytes(31), ip=f"10.0.0.{i}") for i in ids
+            Peer(id=bytes([i]) + bytes(31), ip=f"10.0.0.{i}") for i in ids
         ]
 
         nearest = node.get_k_nearest_neighbors(target, k=3)
 
-        assert [p.node_id[0] for p in nearest] == [1, 2, 3]
+        assert [p.id[0] for p in nearest] == [1, 2, 3]
 
     async def test_knn_honours_custom_k(self, node: KademliaNode):
-        node.peers = [Peer(node_id=os.urandom(32), ip=f"10.0.0.{i}") for i in range(10)]
+        node.peers = [Peer(id=os.urandom(32), ip=f"10.0.0.{i}") for i in range(10)]
         assert len(node.get_k_nearest_neighbors(os.urandom(32), k=4)) == 4
 
     async def test_knn_raises_on_id_length_mismatch(self, node: KademliaNode):
         node.peers = [
-            Peer(node_id=os.urandom(16), ip="10.0.0.1"),  # wrong length
-            Peer(node_id=os.urandom(32), ip="10.0.0.2"),
+            Peer(id=os.urandom(16), ip="10.0.0.1"),  # wrong length
+            Peer(id=os.urandom(32), ip="10.0.0.2"),
         ]
         # k=1 with 2 peers forces the distance computation (no early return).
         with pytest.raises(ValueError):
@@ -383,7 +383,7 @@ class TestKademliaNode:
         assert reply.in_reply_to == req.msg_id
 
     async def test_find_node_request_returns_known_peers(self, node: KademliaNode):
-        node.peers = [Peer(node_id=os.urandom(32), ip="9.9.9.9")]
+        node.peers = [Peer(id=os.urandom(32), ip="9.9.9.9")]
         req = make_msg(MsgType.FIND_NODE, FindNodePayload(target=os.urandom(32)))
 
         await node.handle_msg("203.0.113.5", req)
@@ -410,7 +410,7 @@ class TestKademliaNode:
         assert reply.payload.nodes == []
 
     async def test_find_value_miss_returns_neighbors(self, node: KademliaNode):
-        node.peers = [Peer(node_id=os.urandom(32), ip="9.9.9.9")]
+        node.peers = [Peer(id=os.urandom(32), ip="9.9.9.9")]
         req = make_msg(MsgType.FIND_VALUE, FindValuePayload(key=os.urandom(32)))
 
         await node.handle_msg("203.0.113.5", req)
@@ -499,7 +499,7 @@ class TestKademliaNode:
     async def test_e2e_find_node_returns_peers_neighbors(self, network: FakeNetwork):
         a = network.add_node("10.0.0.1", build_node())
         b = network.add_node("10.0.0.2", build_node())
-        b.peers = [Peer(node_id=os.urandom(32), ip="9.9.9.9")]
+        b.peers = [Peer(id=os.urandom(32), ip="9.9.9.9")]
 
         result = await a.find_node_req("10.0.0.2", target=os.urandom(32))
         assert result == b.peers
