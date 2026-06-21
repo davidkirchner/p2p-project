@@ -269,6 +269,29 @@ class TestBuckets:
         # and be removed from the cache
         assert c not in buckets._cache_for(c)
 
+    def test_unresponsive_candidate_is_dropped_and_next_alive_is_promoted(self):
+        buckets, pings = make_buckets(k=2)
+        a, b, c, d = generate_contact_ids(7, 4)
+        bucket, cache = buckets.buckets[7], buckets.candidate_cache[7]
+        buckets.register_successful_contact(a, "10.0.0.1")
+        buckets.register_successful_contact(b, "10.0.0.2")
+        buckets.register_successful_contact(c, "10.0.0.3")  # cached (oldest)
+        buckets.register_successful_contact(d, "10.0.0.4")  # cached (will not answer ping on promotion)
+
+        # failure of peer in bucket
+        for _ in range(buckets.failure_remove_threshold):
+            buckets.register_failure(a)
+
+        assert pings == ["10.0.0.4"]
+        buckets.register_failure(d) # doesn't answer ping
+        assert d not in cache
+        assert d not in bucket
+
+        assert pings == ["10.0.0.4", "10.0.0.3"]
+        buckets.register_successful_contact(c, "10.0.0.3")
+        assert c not in cache
+        assert c in bucket
+
     # ---- register_failure ----------------------------------------------------
 
     def test_failure_on_unknown_peer_is_noop(self):

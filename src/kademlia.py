@@ -199,7 +199,7 @@ class Buckets:
     def _determine_bucket(self, peer_id: bytes) -> int:
         distance = int.from_bytes(byte_xor(self.node_id, peer_id))
         if distance == 0:
-            raise ValueError(f"Peer-id {peer_id!r} is identical to our own node_id")
+            raise ValueError(f"Peer-id {peer_id!r} is identical to this node's ID")
         return distance.bit_length() - 1
 
     def _bucket_for(self, peer_id: bytes) -> dict[bytes, Contact]:
@@ -235,12 +235,6 @@ class Buckets:
             self._remove_oldest_dict_entry(cache)
         cache[peer_id] = Contact(ip=peer_ip)
 
-    def _get_latest_candidate(self, peer_id: bytes) -> tuple[bytes, Contact] | None:
-        cache = self._cache_for(peer_id)
-        if not cache:
-            return None
-        return cache.popitem()
-
     def _mark_alive(self, peer_id: bytes) -> None:
         bucket = self._bucket_for(peer_id)
         try:
@@ -249,18 +243,29 @@ class Buckets:
             raise ValueError(f"Peer-id {peer_id!r} is not present in its bucket")
         bucket[peer_id].fail_counter = 0
 
+    def _ping_next_candidate(self, bucket_id: int) -> None:
+        cache = self.candidate_cache[bucket_id]
+        if not cache:
+            return
+        next_candidate_id = next(reversed(cache))
+        self.on_needs_ping(cache[next_candidate_id].ip)
+
     def register_failure(self, peer_id: bytes) -> None:
         bucket = self._bucket_for(peer_id)
-        if peer_id not in bucket:
-            return
-        bucket[peer_id].fail_counter += 1
+        cache = self._cache_for(peer_id)
+        bucket_id = self._determine_bucket(peer_id)
 
-        if bucket[peer_id].fail_counter >= self.failure_remove_threshold:
-            bucket.pop(peer_id)
-            # If there is a candidate  peer in the waiting list, ping it so it will be
-            # promoted on the received pong.
-            if (candidate := self._get_latest_candidate(peer_id)):
-                self.on_needs_ping(candidate[1].ip)
+        if peer_id in cache:
+            del cache[peer_id]
+            self._ping_next_candidate(bucket_id)
+            return
+
+        if peer_id in bucket:
+            bucket[peer_id].fail_counter += 1
+
+            if bucket[peer_id].fail_counter >= self.failure_remove_threshold:
+                bucket.pop(peer_id)
+                self._ping_next_candidate(bucket_id)
 
     def register_successful_contact(self, peer_id: bytes, peer_ip: str):
         bucket = self._bucket_for(peer_id)
