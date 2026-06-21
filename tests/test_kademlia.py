@@ -4,12 +4,15 @@ import hashlib
 import contextlib
 
 import pytest
+from typing import Any
 from uuid import uuid4
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
 from kademlia import (
+    Buckets,
+    ID_SPACE,
     KademliaMsg,
     KademliaNode,
     KADEMLIA_PORT,
@@ -44,8 +47,8 @@ pub_raw = pub.public_bytes(
 sender_id = hashlib.sha256(pub_raw).digest()
 
 
-def make_msg(msg_type, payload, **overrides):
-    kwargs = dict(
+def make_msg(msg_type: MsgType, payload: Payload | dict, **overrides) -> KademliaMsg:
+    kwargs: dict[str, Any] = dict(
         msg_type=msg_type,
         msg_id=uuid4().bytes,
         sender_id=sender_id,
@@ -130,19 +133,218 @@ def test_binary_signature_roundtrip():
     assert parsed.signature == sig
 
 
+
+# =============================================================================
+# Buckets tests
+# =============================================================================
+
+# create an all-zero node_id, so a peer's XOR distance to it is just the
+# integer value of its own id.
+NODE_ID = bytes(ID_SPACE // 8)  # 32 zero bytes
+
+
+def peer_id_at(distance: int) -> bytes:
+    """A peer id whose XOR distance to the all-zero NODE_ID is ``distance``."""
+    return distance.to_bytes(ID_SPACE // 8, "big")
+
+
+def generate_contact_ids(bucket_index: int, count: int) -> list[bytes]:
+    first_distance = 1 << bucket_index
+    return [peer_id_at(first_distance + i) for i in range(count)]
+
+
+def make_buckets(k: int = 10) -> tuple[Buckets, list[str]]:
+    """A Buckets instance plus the list its on_needs_ping callback appends to."""
+    pinged: list[str] = []
+    return Buckets(NODE_ID, pinged.append, k=k), pinged
+
+
+class TestBuckets:
+    # ---- bucket placement ----------------------------------------------------
+
+    def test_determine_bucket_uses_xor_distance_bit_length(self):
+        buckets, _ = make_buckets()
+        # distance 1 -> bit_length 1 -> bucket 0; distance 128 -> bucket 7.
+        assert buckets._determine_bucket(peer_id_at(1)) == 0
+        assert buckets._determine_bucket(peer_id_at(2)) == 1
+        assert buckets._determine_bucket(peer_id_at(3)) == 1
+        assert buckets._determine_bucket(peer_id_at(128)) == 7
+
+    def test_determine_bucket_rejects_own_id(self):
+        buckets, _ = make_buckets()
+        with pytest.raises(ValueError):
+            buckets._determine_bucket(NODE_ID)
+
+    # ---- register_successful_contact: add / lookup ---------------------------
+
+    def test_successful_contact_adds_new_peer(self):
+        buckets, _ = make_buckets()
+        peer_id = peer_id_at(5)
+        buckets.register_successful_contact(peer_id, "10.0.0.5")
+        assert buckets.get_peer(peer_id) == Peer(id=peer_id, ip="10.0.0.5")
+
+    def test_get_peer_returns_none_for_unknown(self):
+        buckets, _ = make_buckets()
+        assert buckets.get_peer(peer_id_at(42)) is None
+
+    def test_successful_contact_for_known_peer_resets_failures(self):
+        buckets, _ = make_buckets()
+        peer_id = peer_id_at(5)
+        buckets.register_successful_contact(peer_id, "10.0.0.5")
+        buckets.register_failure(peer_id)
+        assert buckets._bucket_for(peer_id)[peer_id].fail_counter == 1
+
+        # Seeing the peer again must clear its accumulated failures.
+        buckets.register_successful_contact(peer_id, "10.0.0.5")
+        assert buckets._bucket_for(peer_id)[peer_id].fail_counter == 0
+
+    def test_mark_alive_moves_peer_to_tail(self):
+        buckets, _ = make_buckets()
+        ids = generate_contact_ids(7, 3)
+        for i, peer_id in enumerate(ids):
+            buckets.register_successful_contact(peer_id, f"10.0.0.{i}")
+
+        # Touch the first-inserted peer; it should become the most-recent (tail).
+        buckets.register_successful_contact(ids[0], "10.0.0.0")
+        order = list(buckets._bucket_for(ids[0]).keys())
+        assert order[-1] == ids[0]
+        assert buckets._bucket_for(ids[0])[ids[0]].ip == "10.0.0.0"
+
+    # ---- bucket-full handling / candidate cache ------------------------------
+
+    def test_full_bucket_diverts_new_peer_to_cache(self):
+        buckets, _ = make_buckets(k=2)
+        a, b, c = generate_contact_ids(7, 3)
+        buckets.register_successful_contact(a, "10.0.0.1")
+        buckets.register_successful_contact(b, "10.0.0.2")
+        # Bucket is now full (k=2); the third peer must not enter the bucket.
+        buckets.register_successful_contact(c, "10.0.0.3")
+        cache = buckets._cache_for(c)
+
+        assert buckets.get_peer(c) is None
+        assert len(cache) == 1
+        assert c in cache
+
+    def test_cache_evicts_oldest_when_full(self):
+        buckets, _ = make_buckets(k=2)
+        a, b, c, d, e = generate_contact_ids(7, 5)
+        # Fill the bucket, then overflow the cache (also size k=2).
+        buckets.register_successful_contact(a, "10.0.0.1")
+        buckets.register_successful_contact(b, "10.0.0.2")
+        buckets.register_successful_contact(c, "10.0.0.3")  # cached (oldest)
+        buckets.register_successful_contact(d, "10.0.0.4")  # cached
+        buckets.register_successful_contact(e, "10.0.0.5")  # evicts c
+
+        cache = buckets._cache_for(a)
+        assert c not in cache
+        assert set(cache) == {d, e}
+
+    def test_recaching_known_candidate_refreshes_its_position(self):
+        buckets, _ = make_buckets(k=2)
+        a, b, c, d = generate_contact_ids(7, 4)
+        buckets.register_successful_contact(a, "10.0.0.1")
+        buckets.register_successful_contact(b, "10.0.0.2")
+        buckets.register_successful_contact(c, "10.0.0.3")  # cached (oldest)
+        buckets.register_successful_contact(d, "10.0.0.4")  # cached
+        # Re-seeing c moves it to the tail, so d is now the oldest.
+        buckets.register_successful_contact(c, "10.0.0.3")
+
+        assert list(buckets._cache_for(a)) == [d, c]
+
+    def test_promoting_to_bucket_drops_stale_cache_entry(self):
+        buckets, _ = make_buckets(k=2)
+        a, b, c = generate_contact_ids(7, 3)
+        buckets.register_successful_contact(a, "10.0.0.1")
+        buckets.register_successful_contact(b, "10.0.0.2")
+        buckets.register_successful_contact(c, "10.0.0.3")  # cached
+        assert c in buckets._cache_for(c)
+
+        # failure of peer in bucket
+        for _ in range(buckets.failure_remove_threshold):
+            buckets.register_failure(a)
+
+        buckets.register_successful_contact(c, "10.0.0.3")
+        # cached peer should have replaced failed peer
+        assert buckets.get_peer(c) == Peer(id=c, ip="10.0.0.3")
+        # and be removed from the cache
+        assert c not in buckets._cache_for(c)
+
+    # ---- register_failure ----------------------------------------------------
+
+    def test_failure_on_unknown_peer_is_noop(self):
+        buckets, pinged = make_buckets()
+        buckets.register_failure(peer_id_at(99))  # never seen -> nothing happens
+        assert pinged == []
+
+    def test_peer_removed_after_threshold_failures(self):
+        buckets, _ = make_buckets()
+        peer_id = peer_id_at(5)
+        buckets.register_successful_contact(peer_id, "10.0.0.5")
+        # peer survives the failures if failures < threshold
+        for _ in range(buckets.failure_remove_threshold - 1):
+            buckets.register_failure(peer_id)
+        assert buckets.get_peer(peer_id) is not None
+        # one more failure => threshold reached
+        buckets.register_failure(peer_id)
+        assert buckets.get_peer(peer_id) is None
+
+    def test_eviction_pings_waiting_candidate(self):
+        buckets, pinged = make_buckets(k=2)
+        a, b, c = generate_contact_ids(7, 3)
+        buckets.register_successful_contact(a, "10.0.0.1")
+        buckets.register_successful_contact(b, "10.0.0.2")
+        buckets.register_successful_contact(c, "10.0.0.3")  # cached candidate
+
+        for _ in range(buckets.failure_remove_threshold):
+            buckets.register_failure(a)  # remove a, freeing a slot
+
+        # The freed slot triggers a ping to the waiting candidate so it can be
+        # promoted once it answers.
+        assert pinged == ["10.0.0.3"]
+
+    def test_eviction_without_candidate_pings_nothing(self):
+        buckets, pinged = make_buckets()
+        peer_id = peer_id_at(5)
+        buckets.register_successful_contact(peer_id, "10.0.0.5")
+        for _ in range(buckets.failure_remove_threshold):
+            buckets.register_failure(peer_id)
+        assert pinged == []
+
+    # ---- get_k_nearest_neighbors ---------------------------------------------
+
+    def test_knn_empty_when_no_peers(self):
+        buckets, _ = make_buckets()
+        assert buckets.get_k_nearest_neighbors(peer_id_at(1)) == []
+
+    def test_knn_sorted_by_xor_distance_to_target(self):
+        buckets, _ = make_buckets()
+        for d in (5, 3, 9, 1, 7):
+            buckets.register_successful_contact(peer_id_at(d), f"10.0.0.{d}")
+
+        # Target all-zeros: distance == id
+        nearest = buckets.get_k_nearest_neighbors(NODE_ID)
+        assert [int.from_bytes(p.id) for p in nearest] == [1, 3, 5, 7, 9]
+
+    def test_knn_caps_at_k(self):
+        buckets, _ = make_buckets(k=3)
+        for i, peer_id in enumerate(generate_contact_ids(7, 2)):
+            buckets.register_successful_contact(peer_id, f"10.0.7.{i}")
+        # A couple of peers in another bucket too, to span buckets.
+        for i, peer_id in enumerate(generate_contact_ids(20, 2)):
+            buckets.register_successful_contact(peer_id, f"10.0.20.{i}")
+
+        neighbors = buckets.get_k_nearest_neighbors(NODE_ID)
+        assert len(neighbors) == 3
+        assert [x.ip for x in neighbors] == ["10.0.7.0", "10.0.7.1", "10.0.20.0"]
+
+
+
 # =============================================================================
 # KademliaNode tests
 # =============================================================================
 #
-# Test helpers. A node is built around a SocketHandler and talks to the
-# outside world *only* through its two queues:
-#
-#   inbox_queue   -> (sender_ip, raw_bytes)        # things to handle
-#   outbox_queue  <- (dest_ip, dest_port, raw_bytes)  # things it emits
-#
-# So the tests drive a node by putting bytes on its inbox and asserting on what
-# shows up on its outbox -- no real networking involved.
-
+# A node only touches the network through its SocketHandler's two queues, so the
+# tests feed its inbox and read its outbox instead of using real sockets
 
 def new_identity() -> tuple[bytes, bytes]:
     """A fresh (node_id, pubkey) pair with node_id == sha256(pubkey).
