@@ -217,6 +217,8 @@ class Buckets:
         '''Raises KeyError when key does not exist'''
         d[key] = d.pop(key)
 
+    def _all_entries_in_buckets(self) -> list[tuple[bytes, Contact]]:
+        return [e for bucket in self.buckets.values() for e in bucket.items()]
 
     def _add_peer(self, peer_id: bytes, peer_ip: str) -> None:
         bucket = self._bucket_for(peer_id)
@@ -267,10 +269,23 @@ class Buckets:
             self._mark_alive(peer_id)
         elif len(bucket) < self.k:
             self._add_peer(peer_id, peer_ip)
+            # remove peer from cache in case it was cached before
             self._cache_for(peer_id).pop(peer_id, None)
         else:
             self._cache_peer(peer_id, peer_ip)
 
+    def get_k_nearest_neighbors(self, target_id: bytes) -> list[Peer]:
+        def by_distance(item: tuple[bytes, Contact]):
+            return byte_xor(item[0], target_id)
+
+        k_neighbors = sorted(self._all_entries_in_buckets(), key=by_distance)[:self.k]
+        return [Peer(id=n[0], ip=n[1].ip) for n in k_neighbors]
+
+    def get_peer(self, peer_id: bytes) -> Peer | None:
+        bucket = self._bucket_for(peer_id)
+        if peer_id not in bucket:
+            return None
+        return Peer(id=peer_id, ip=bucket[peer_id].ip)
 
 
 @dataclass
