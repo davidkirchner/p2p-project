@@ -1,108 +1,274 @@
-from functools import partial
+from abc import abstractmethod
+from contextlib import contextmanager, suppress
+from datetime import timezone
 from inspect import isawaitable
-import sys
-import os
+from multiprocessing import Value
 import re
+import sys
 
-from contextlib import closing
-import threading
-import time
-from typing import Awaitable, Callable, List, Self
+from textwrap import indent
+from typing import Awaitable, Callable, Optional, Self
 import asyncio
-import argparse
 
 from closable import Closable
 from config import Config
 from db.sqlite_impl import SqliteDatabase
+from handlers import HandlerBase
 from models import *
 import shlex
+from aioitertools.helpers import maybe_await
 
-# These are a bunch of classes for messages the ui sends out
+
+from models import ChatID, UserID
+    
+    
+class Handler(HandlerBase):
+    async def send_message(self, user: UserID | None, chat: ChatID | None, content: bytes, content_type: str):
+        pass
+    
+    async def create_user(self, name: str):
+        pass
+    
+    async def execute_command(self, user: UserID | None, chat: ChatID | None, args: list[str]):
+        pass
+    
+
+
+
+class InputParser[T]:
+    @property
+    def prompt(self) -> str:
+        return ""
+    
+    @abstractmethod
+    def parse(self, s) -> T:
+        return s.strip()
+
+
 @dataclass
-class ChatContext:
-    chat: ChatID | None
-    user: UserID | None
-
+class ConfirmParser(InputParser):
+    default: Optional[bool] = True
+    
+    @property
+    def prompt(self):
+        match self.default:
+            case True: return "[Y/n] "
+            case False: return "[y/N] "
+            case None: return "[y/n] "
+    
+    def parse(self, s) -> bool:
+        s = s.strip()
+        if not s: 
+            if self.default is None:
+                raise ValueError(f"You must choose between yes or no explicitly")
+            return self.default
+        if s.lower() in ("y", "yes", "ok", "1"):
+            return True
+        elif s.lower() in ("n", "no", "0"):
+            return False
+        else:
+            raise SyntaxError(s)
+        
+        
 @dataclass
-class SendMessage(ChatContext):
-    content: bytes
-    content_type: str
-
-
+class ChoiceParser[T](InputParser):
+    options: list[T] | dict[str, T]
+    formatter: Callable[[T], str] = str
+    
+    @property
+    def prompt(self):
+        p = "Choose between:\n"
+        if isinstance(self.options, dict):
+            largest_key_len = max(map(len, self.options))
+            for key, value in self.options.items():
+                p += f"[{key.rjust(largest_key_len)}] {self.formatter(value)}\n"
+        else:
+            largest_key_len = len(str(len(self.options)))
+            for i, value in enumerate(self.options):
+                p += f"[{str(i).rjust(largest_key_len)}] {self.formatter(value)}\n"
+        return p
+    
+    def parse(self, s) -> T:
+        s = s.strip()
+        if isinstance(self.options, dict):
+            return self.options[s]
+        else:
+            i = int(s)
+            return self.options[i]
+        
 @dataclass
-class ExecuteCommand(ChatContext):
-    args: list[str]
+class RegexParser(InputParser):
+    r: str = r"+*"
+    
+    @property
+    def prompt(self): return ""
+    
+    def parse(self, s) -> str:
+        s = s.strip()
+        if not re.fullmatch(self.r, s):
+            raise SyntaxError(f"Did not match regex {self.r}")
+        return s
+    
+    
+class Escape(Exception):
+    pass
+
+class Reset(Exception):
+    pass
+
+
+async def race(fs):
+    done, pending = await asyncio.wait(fs, return_when=asyncio.FIRST_COMPLETED)
+    for p in pending:
+        p.cancel()
+        with suppress(asyncio.CancelledError):
+            await p
+    return await done.pop()
+        
 
 
 class SimpleTerminalUI(Closable):
-    def __init__(self, database: Storage, incoming_events: asyncio.Queue, outgoing_events: asyncio.Queue, user: UserID | None = None, current_chat: ChatID | None = None):
+    def __init__(self, database: Storage, handler: Handler, user: UserID | None = None, chat: ChatID | None = None):
         Closable.__init__(self)
         self.database = database
-        self.incoming_events = incoming_events
-        self.outgoing_events = outgoing_events
-        self.current_chat = current_chat
-        self.user = user
+        self.handler = handler
+        self.chat: ChatID | None = chat
+        self.user: UserID | None = user
         
+        self._indent: str = ""
+        self._print_indent: bool = True
+        self._prompt: str = ""
+        
+        self._input_fut = None
         self.exit_event = asyncio.Event()
+        self._state_change_condition = asyncio.Condition()
         
     @classmethod
-    async def create_and_start(cls, database: Storage, incoming_events: asyncio.Queue, user: UserID | None = None, current_chat: ChatID | None = None) -> Self:
+    async def create_and_run_to_completion(cls, database: Storage, handler: Handler, user: UserID | None = None, chat: ChatID | None = None) -> Self:
         ui = cls(
             database=database,
-            incoming_events=incoming_events,
-            outgoing_events=asyncio.Queue(),
+            handler=handler,
             user=user,
-            current_chat=current_chat
+            chat=chat
         )
-        ui.bind_closable(input_loop(ui._handle_raw_input))
-        ui.bind_closable(ui._handle_incoming_message_loop())
-        await ui.display_chat(None)
+        
+        ui._ensure_terminal()
+        ui.bind_closable(ui._root_view())
+        await ui.exit_event.wait()
+        await ui.close()
         return ui
     
-    async def _handle_raw_input(self, input: str):
-        if input.startswith(" "):
-            command = shlex.split(input.strip())
-            await self.outgoing_events.put(ExecuteCommand(self.current_chat, self.user, command))
-            
-            # TODO: for now, also actually exit instead of just sending the message
-            if input.strip() in ("exit",):
-                self.exit_event.set()
-                return
-            
-            if self.current_chat and input.strip() in ("r", "return"):
-                await self.display_chat(None)
-                return
+    async def _print(self, message: str, end: str | None = "\n"): 
+        if self._print_indent:
+            print(self._indent, end=None)
+            self._print_indent = message.endswith("\n") or (end is not None and end.endswith("\n"))
+        print(message.replace("\n", self._indent + "\n"), flush=True, sep=None, end=end)
         
-        assert self.current_chat and self.user
-        assert isinstance(self.database, SqliteDatabase)
+    async def _print_message(self, msg: Message):
+        display_name = (await self.database.User.by_id(msg.sender)).name
+        display_str = msg.content.decode("utf-8")
+        await self._print(f"\r\033[K[{display_name} {msg.timestamp.time()}] {display_str}")
         
-        
-        # TODO: this part for demonstration purposes right now also creates a database object. 
-        # This should be done outside in the future and the ui is merely notified of changed database state
-        await self.outgoing_events.put(SendMessage(
-            self.current_chat, 
-            self.user, 
-            input.strip().encode("utf-8"), 
-            "text/plain"
-        ))
-
-        msg = await self.database.Message.create( 
-            chat=self.current_chat, 
-            sender=self.user, 
-            content=input.strip().encode("utf-8"), 
-            content_type="text/plain"
-        )
-        self.outgoing_events.put_nowait(msg)
-        await self.handle_message(msg)
-        
-    async def _handle_incoming_message_loop(self):
+    async def _print_error(self, msg):
+        await self._print(f"ERROR: {msg}")
+    
+    async def _root_view(self):
         while True:
-            res = await self.incoming_events.get()
-            self.bind_closable(self._handle_incoming_message(res))
-        
-    async def _handle_incoming_message(self, message):
-        pass # TODO: implement handling of incoming messages from the rest of the system.
-        # What messages will those be?
+            with suppress(Escape, Reset):  # only catch reset here
+                if self.user is None:
+                    # no user selected. select one
+                    self._selectable_users = selectable_users = await self.database.User.local_profiles()
+                    if not selectable_users:
+                        await self._print("Hello there!")
+                        await self._print("No local users exist. You should create one i guess...")
+                        if not await self._input(ConfirmParser(), "Create user?"): return
+                        name = await self._input(RegexParser(r"\w+"), "His name: ")
+                        await self.handler.create_user(name)
+                        async with self._state_change_condition:
+                            await self._state_change_condition.wait_for(lambda: self.user is not None)
+                    elif len(selectable_users) == 1:
+                        user_data = await self.database.User.by_id(selectable_users[0])
+                        await self._print(f"You are now logged in as {user_data.name}")
+                    else:
+                        raise NotImplementedError
+                        await self._print(f"You have to select among different users:")
+                        await self._print_enumerable([(await self.database.User.by_id(uid)).name for uid in selectable_users])
+                        
+                elif self.chat is None:
+                    await self._print("Your chats:")
+                    chat_ids = await (await self.database.User.by_id(self.user)).chats()
+                    chat_id = await self._input(ChoiceParser(chat_ids), "Select one: ")
+                    self.chat = chat_id
+                else:
+                    await self._messages_view()
+                
+    async def _messages_view(self):
+        with suppress(Escape):
+            msg_ids = await(await self.database.Chat.by_id(self.chat)).messages(5, before=datetime.now(tz=timezone.utc))
+            last_5_messages = await asyncio.gather(*[self.database.Message.by_id(mid) for mid in msg_ids])
+            for msg in last_5_messages:
+                await self._print_message(msg)
+            display_name = (await self.database.User.by_id(self.user)).name
+            self._prompt = f"[{display_name} --:--:--.------] "
+            
+            while True:
+                await self._print(self._prompt, end=None)
+                msg = await self._input(InputParser())
+                await self.send_message(msg)
+    
+                
+                
+    async def send_message(self, message: str):
+        if self.chat is None:
+            await self._print_error("Cannot send messages since no chat is selected.")
+        self.bind_closable(self.handler.send_message(self.user, self.chat, content=message.encode("utf-8"), content_type="text/plain"))
+    
+    async def exit_ui(self):
+        await self._print("Goodbye!")
+        self.exit_event.set()
+
+    async def escape_view(self):
+        if self._input_fut:
+            self._input_fut.set_exception(Escape())
+            
+    async def reset_view(self):
+        if self._input_fut:
+            self._input_fut.set_exception(Reset())
+    
+    
+    async def _input(self, parser: InputParser, pre_prompt: str | None = None):
+        if self._input_fut:
+            self._input_fut.cancel()
+            
+        while True:
+            self._input_fut = asyncio.get_running_loop().create_future()
+            if pre_prompt:
+                await self._print(pre_prompt, end=None)
+            await self._print(parser.prompt, end=None)
+            
+            try:
+                raw_input = await race([self._input_fut, asyncio.create_task(asyncio.to_thread(sys.stdin.readline))])
+            finally:
+                self._input_fut = None
+                
+            if raw_input.strip().lower() == "exit":
+                raise Escape()
+            
+            if raw_input.strip().lower() == "reset":
+                raise
+            
+            try:
+                return parser.parse(raw_input)
+            except (ValueError, KeyError) as e:
+                await self._print(f"Bad input value: {e}")
+            except SyntaxError as e:
+                await self._print(f"Bad input syntax: {e}")
+    
+    async def _handle_raw_input(self, input: str):
+        if self._input_fut:
+            self._input_fut.set_result(input)
+        else:
+            await self._print(f"(Input not processed)")
     
     def _ensure_terminal(self) -> None:
         """Raise exception if stdin/stdout is not a real terminal."""
@@ -114,77 +280,3 @@ class SimpleTerminalUI(Closable):
         # ANSI escape works on most modern terminals (including Windows 10+)
         sys.stdout.write("\033[2J\033[H")
         sys.stdout.flush()
-    
-    async def display_chat(self, chat: ChatID | None):
-        self.current_chat = chat
-        self.clear_screen()
-        
-        if chat is None:
-            self._print_start_screen()
-            await self._print_prompt()
-            return
-        
-        last_messages = await (await self.database.Chat.by_id(chat)).messages(n=5, before=datetime.now(tz=None))
-        for msg_id in last_messages:
-            msg = await self.database.Message.by_id(msg_id)
-            await self._print_message(msg)
-        await self._print_prompt()
-
-    async def handle_message(self, msg: Message):
-        if msg.sender == self.user:
-            print("\033[F", end="")  # move cursor up one line
-            await self._print_message(msg)
-        else:
-            await self._print_message(msg)
-        await self._print_prompt()
-        
-    async def _print_message(self, msg: Message):
-        display_name = (await self.database.User.by_id(msg.sender)).name
-        display_str = msg.content.decode("utf-8")
-        print("\r\033[K", end="")
-        print(f"[{display_name} {msg.timestamp.time()}] {display_str}")
-        
-    async def _print_prompt(self):
-        display_name = (await self.database.User.by_id(self.user)).name
-        print(f"[{display_name} --:--:--.------] ", end="", flush=True) 
-        
-    def _print_start_screen(self):
-        print("Hello there! Welcome to chat")
-
-
-async def input_loop(handle_input: Callable[[str], None | Awaitable[None]]):
-    while True:
-        result = await asyncio.to_thread(sys.stdin.readline)
-        res = handle_input(result)
-        if isawaitable(res):
-            await res
-
-
-async def main() -> None:
-    events = asyncio.Queue()
-    config = Config.from_env()
-    database = await SqliteDatabase.create(config.sqlite_path)
-    ui = None
-    
-    
-    # create some example user to play with
-    # bob actually never responds
-    # TODO: implement actual user creation and stuff over the prompt line
-    try:
-        alice = await database.User.by_id("user/alice")
-        chat_id = (await alice.chats())[0]
-    except KeyError:
-        alice = await database.User.create("Alice")
-        bob = await database.User.create("Bob")
-        chat = await database.Chat.create("TEst chat", participants=[alice.id, bob.id])
-        message = await database.Message.create(chat.id, bob.id, b"whatsup")
-        chat_id = chat.id
-    
-    # this context manager automatically does necessary resource management
-    async with await SimpleTerminalUI.create_and_start(database=database, incoming_events=events, user=alice.id) as ui:
-        await ui.display_chat(chat_id)
-        await ui.exit_event.wait()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

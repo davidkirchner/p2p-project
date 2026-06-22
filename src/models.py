@@ -41,9 +41,14 @@ class User(Thing):
     public_identity: bytes
     private_identity: bytes | None
     
+    @classmethod
+    @abc.abstractmethod
+    async def local_profiles(cls) -> list[UserID]:
+        ...
+    
     @abc.abstractmethod
     async def chats(self) -> list[ChatID]:
-        pass
+        ...
     
     
 class Chat(Thing):
