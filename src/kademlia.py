@@ -5,6 +5,9 @@ from typing import Annotated, Any, Callable, Literal, Self
 from pydantic import BaseModel, Field, BeforeValidator, PlainSerializer, SerializeAsAny, model_validator
 from closable import Closable
 from socket_handler import SocketHandler
+from encryption import UserEncryption
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.exceptions import InvalidSignature
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +168,32 @@ class KademliaMsg(BaseModel):
                 f"msg_type {self.msg_type.value} (expected {expected.__name__})"
             )
         return self
+    
+    @model_validator(mode="after")
+    def _verify_signature(self) -> Self:
+        # Skip verification while constructing a new local message.
+        # The signature will be added immediately afterwards in _new_msg().
+        if self.signature == b"":
+            return self
 
+        public_key = Ed25519PublicKey.from_public_bytes(self.sender_pubkey)
+
+        signature = self.signature
+        try:
+            # Serialize the message exactly as it was before signing.
+            self.signature = b""
+            data = self.to_bytes()
+        finally:
+            # Always restore the signature, even if an exception occurs.
+            self.signature = signature
+
+        try:
+            public_key.verify(signature, data)
+        except InvalidSignature:
+            raise ValueError("Invalid signature")
+
+        return self
+    
     def to_bytes(self) -> bytes:
         return self.model_dump_json().encode("utf-8")
 
@@ -308,12 +336,13 @@ class KademliaNode(Closable):
     ``(dest_ip, dest_port, data)``.
     """
 
-    def __init__(self, socket: SocketHandler, node_id: bytes, pubkey: bytes, port: int = KADEMLIA_PORT) -> None:
+    def __init__(self, socket: SocketHandler, node_id: bytes, pubkey: bytes, encryption: UserEncryption, port: int = KADEMLIA_PORT) -> None:
         super().__init__()
         self.socket = socket
         self.node_id = node_id
         self.pubkey = pubkey
         self.port = port
+        self.encryption = encryption
         self.buckets = Buckets(node_id, self._fire_ping)
         self.loop = asyncio.get_running_loop()
         self.peers: list[Peer] = []     # TODO: store this in a more appropriate way
@@ -343,14 +372,17 @@ class KademliaNode(Closable):
 
     def _new_msg(self, msg_type: MsgType, payload: Payload, in_reply_to: bytes | None = None) -> KademliaMsg:
         """Wrap a payload into a KademliaMsg signed with our identity."""
-        return KademliaMsg(
+        msg = KademliaMsg(
             msg_type=msg_type,
             in_reply_to=in_reply_to,
             sender_id=self.node_id,
             sender_pubkey=self.pubkey,
-            signature=b"dummy-sig",   #add implementation
+            signature=b"",
             payload=payload,
         )
+
+        msg.signature = self.encryption.sign(msg.to_bytes())
+        return msg
 
     async def _send(self, dest_ip: str, msg: KademliaMsg) -> None:
         """Fire-and-forget primitive: hand a message to the socket outbox."""
