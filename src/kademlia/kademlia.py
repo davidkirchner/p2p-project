@@ -3,40 +3,18 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Annotated, Any, Callable, Literal, NewType, Self
 from pydantic import BaseModel, Field, BeforeValidator, PlainSerializer, SerializeAsAny, model_validator
-from closable import Closable
-from socket_handler import SocketHandler
 from encryption import UserEncryption
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.exceptions import InvalidSignature
+from closable import Closable
+from socket_handler import SocketHandler
+from .types import B64Bytes, KademliaKey
 
 logger = logging.getLogger(__name__)
 
 # Network-wide well-known port.
 KADEMLIA_PORT = 9009
 ID_SPACE = 256 # bit
-
-def _b64_decode(v: str | bytes) -> bytes:
-    # str   -> from JSON: decode base64 to bytes
-    # bytes -> built in code: already raw bytes, pass through
-    return base64.b64decode(v) if isinstance(v, str) else v
-
-
-# Raw bytes in code, base64 on the wire (JSON has no native bytes type).
-# Python side stays bytes (model_dump()); only JSON gets the base64 string.
-type B64Bytes = Annotated[
-    bytes,
-    # decode: base64 string -> bytes (passthrough if already bytes)
-    BeforeValidator(_b64_decode),
-    # encode: bytes -> base64 string
-    PlainSerializer(
-        lambda v: base64.b64encode(v).decode("ascii"),
-        return_type=str,
-        when_used="json",
-    ),
-]
-
-
-KademliaKey = NewType("KademliaKey", B64Bytes)
 
 
 def kademlia_key(data: bytes) -> KademliaKey:
@@ -176,7 +154,7 @@ class KademliaMsg(BaseModel):
                 f"msg_type {self.msg_type.value} (expected {expected.__name__})"
             )
         return self
-    
+
     @model_validator(mode="after")
     def _verify_signature(self) -> Self:
         # Skip verification while constructing a new local message.
@@ -201,7 +179,7 @@ class KademliaMsg(BaseModel):
             raise ValueError("Invalid signature")
 
         return self
-    
+
     def to_bytes(self) -> bytes:
         return self.model_dump_json().encode("utf-8")
 

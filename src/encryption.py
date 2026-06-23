@@ -7,7 +7,7 @@ from typing import Any, Callable, Self, Union
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.hazmat.primitives import serialization
 
-from models import KademliaKey, Storage, User, UserID
+from models import Storage, User, UserID
 
 
 @dataclass
@@ -56,7 +56,7 @@ class UserEncryption(PeerEncryption):
             encoding=serialization.Encoding.PEM,
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
-        from kademlia import kademlia_key
+        from .kademlia.kademlia import kademlia_key
         id = kademlia_key(public_bytes)
 
         user = await storage.User.create(id=id, name=name, public_identity=public_bytes, private_identity=private_bytes)

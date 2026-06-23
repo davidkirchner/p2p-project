@@ -10,7 +10,7 @@ from uuid import uuid4
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
-from kademlia import (
+from kademlia.kademlia import (
     Buckets,
     ID_SPACE,
     KademliaMsg,
@@ -62,7 +62,6 @@ def make_msg(msg_type: MsgType, payload: Payload | dict, **overrides) -> Kademli
 
 
 def test_empty_dict_payload_is_coerced():
-    # {} für PING soll zum PingPayload werden (Abwärtskompatibilität).
     msg = make_msg(MsgType.PING, {})
     assert isinstance(msg.payload, PingPayload)
 
