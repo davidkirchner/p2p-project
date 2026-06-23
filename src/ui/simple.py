@@ -255,7 +255,7 @@ class SimpleTerminalUI(Closable):
                 raise Escape()
             
             if raw_input.strip().lower() == "reset":
-                raise
+                raise Reset()
             
             try:
                 return parser.parse(raw_input)
