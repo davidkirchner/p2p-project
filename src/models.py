@@ -5,9 +5,11 @@ from typing import Any, NewType, Self
 import uuid
 from datetime import datetime
 
+from kademlia import B64Bytes
 
 
-KademliaKey = NewType("KademliaKey", bytes)
+
+KademliaKey = NewType("KademliaKey", B64Bytes)
 
 
 UserID = NewType("UserID", KademliaKey)
@@ -41,9 +43,14 @@ class User(Thing):
     public_identity: bytes
     private_identity: bytes | None
     
+    @classmethod
+    @abc.abstractmethod
+    async def local_profiles(cls) -> list[UserID]:
+        ...
+    
     @abc.abstractmethod
     async def chats(self) -> list[ChatID]:
-        pass
+        ...
     
     
 class Chat(Thing):

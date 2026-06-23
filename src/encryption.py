@@ -7,25 +7,29 @@ from typing import Any, Callable, Self, Union
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.hazmat.primitives import serialization
 
+from kademlia import kademlia_key
 from models import KademliaKey, Storage, User, UserID
 
 
 @dataclass
 class PeerEncryption:
     id: UserID
+    user: User
     public_key: Ed25519PublicKey
-        
+    
     @classmethod
     async def from_existing(cls, user: User) -> Union["PeerEncryption", "UserEncryption"]:
         if user.private_identity:
             return UserEncryption(
                 id=user.id,
+                user=user,
                 private_key=Ed25519PrivateKey.from_private_bytes(user.private_identity),
                 public_key=Ed25519PublicKey.from_public_bytes(user.public_identity)
             )
         else:
             return PeerEncryption(
                 id=user.id,
+                user=user,
                 public_key=Ed25519PublicKey.from_public_bytes(user.public_identity)
             )
     
@@ -38,7 +42,7 @@ class UserEncryption(PeerEncryption):
     private_key: Ed25519PrivateKey
     
     @classmethod
-    async def create_new_user(cls, storage: Storage, get_kademlia_key: Callable[[Any], KademliaKey], name: str) -> Self:
+    async def create_new_user(cls, storage: Storage, name: str) -> Self:
         private_key: Ed25519PrivateKey = Ed25519PrivateKey.generate()
         public_key = private_key.public_key()
         
@@ -54,12 +58,13 @@ class UserEncryption(PeerEncryption):
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
         )
         
-        id = get_kademlia_key(public_bytes)
+        id = kademlia_key(public_bytes)
         
         user = await storage.User.create(id=id, name=name, public_identity=public_bytes, private_identity=private_bytes)
         
         return cls(
             id=user.id,
+            user=user,
             private_key=private_key,
             public_key=public_key
         )
