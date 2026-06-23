@@ -5,9 +5,11 @@ from typing import Any, NewType, Self
 import uuid
 from datetime import datetime
 
+from kademlia import B64Bytes
 
 
-KademliaKey = NewType("KademliaKey", bytes)
+
+KademliaKey = NewType("KademliaKey", B64Bytes)
 
 
 UserID = NewType("UserID", KademliaKey)

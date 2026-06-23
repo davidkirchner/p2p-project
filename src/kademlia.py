@@ -1,7 +1,7 @@
 import uuid, base64, hashlib, logging, asyncio
 from dataclasses import dataclass
 from enum import Enum
-from typing import Annotated, Any, Callable, Literal, Self
+from typing import Annotated, Any, Callable, Literal, NewType, Self
 from pydantic import BaseModel, Field, BeforeValidator, PlainSerializer, SerializeAsAny, model_validator
 from closable import Closable
 from socket_handler import SocketHandler
@@ -20,7 +20,7 @@ def _b64_decode(v: str | bytes) -> bytes:
 
 # Raw bytes in code, base64 on the wire (JSON has no native bytes type).
 # Python side stays bytes (model_dump()); only JSON gets the base64 string.
-B64Bytes = Annotated[
+type B64Bytes = Annotated[
     bytes,
     # decode: base64 string -> bytes (passthrough if already bytes)
     BeforeValidator(_b64_decode),
@@ -31,6 +31,14 @@ B64Bytes = Annotated[
         when_used="json",
     ),
 ]
+
+
+KademliaKey = NewType("KademliaKey", B64Bytes)
+
+
+def kademlia_key(data: bytes) -> KademliaKey:
+    return KademliaKey(hashlib.sha256(data).digest())
+
 
 class MsgType(str, Enum):
     PING = "PING"
