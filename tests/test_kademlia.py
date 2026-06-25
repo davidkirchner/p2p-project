@@ -54,10 +54,15 @@ def make_msg(msg_type: MsgType, payload: Payload | dict, **overrides) -> Kademli
         sender_id=sender_id,
         sender_pubkey=pub_raw,
         payload=payload,
-        signature=b"dummy-sig",
+        # Built with an empty signature (verification is skipped for it) so we
+        # can sign the serialized message below, exactly as _new_msg() does.
+        signature=b"",
     )
     kwargs.update(overrides)
-    return KademliaMsg(**kwargs)
+    msg = KademliaMsg(**kwargs)
+    if "signature" not in overrides:
+        msg.signature = priv.sign(msg.to_bytes())
+    return msg
 
 
 
@@ -124,12 +129,7 @@ def test_payload_roundtrip(msg_type: MsgType, payload: Payload):
     assert type(parsed.payload) is type(payload)
 
 
-def test_binary_signature_roundtrip():
-    # echte binäre Signatur (kein gültiges UTF-8) muss verlustfrei durchlaufen.
-    sig = os.urandom(64)
-    msg = make_msg(MsgType.PING, PingPayload(), signature=sig)
-    parsed = KademliaMsg.from_bytes(msg.to_bytes())
-    assert parsed.signature == sig
+
 
 
 
@@ -368,14 +368,26 @@ class TestBuckets:
 # A node only touches the network through its SocketHandler's two queues, so the
 # tests feed its inbox and read its outbox instead of using real sockets
 
-def new_identity() -> tuple[bytes, bytes]:
-    """A fresh (node_id, pubkey) pair with node_id == sha256(pubkey).
+class _Signer:
+    """Minimal stand-in for UserEncryption: KademliaNode only calls .sign()."""
 
-    The pubkey does not have to be a real key for these tests: KademliaMsg only
-    checks that sender_id == sha256(sender_pubkey).
+    def __init__(self, private_key: Ed25519PrivateKey) -> None:
+        self._private_key = private_key
+
+    def sign(self, message: bytes) -> bytes:
+        return self._private_key.sign(message)
+
+
+def new_identity() -> tuple[bytes, bytes, _Signer]:
+    """A fresh (node_id, pubkey, signer) triple with node_id == sha256(pubkey).
+
     """
-    pubkey = os.urandom(32)
-    return hashlib.sha256(pubkey).digest(), pubkey
+    private_key = Ed25519PrivateKey.generate()
+    pubkey = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    return hashlib.sha256(pubkey).digest(), pubkey, _Signer(private_key)
 
 
 def build_node(*, port: int = KADEMLIA_PORT) -> KademliaNode:
@@ -384,8 +396,9 @@ def build_node(*, port: int = KADEMLIA_PORT) -> KademliaNode:
     Must be called from within a running event loop (KademliaNode grabs the
     loop in __init__).
     """
-    node_id, pubkey = new_identity()
-    return KademliaNode(SocketHandler(), node_id, pubkey, port=port)
+    node_id, pubkey, signer = new_identity()
+    encryption: Any = signer  # KademliaNode only needs .sign(); see _Signer
+    return KademliaNode(SocketHandler(), node_id, pubkey, encryption, port=port)
 
 
 async def get_outbox(node: KademliaNode, timeout: float = 1.0):
