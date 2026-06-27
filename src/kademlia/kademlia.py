@@ -155,30 +155,20 @@ class KademliaMsg(BaseModel):
             )
         return self
 
-    @model_validator(mode="after")
-    def _verify_signature(self) -> Self:
-        # Skip verification while constructing a new local message.
-        # The signature will be added immediately afterwards in _new_msg().
-        if self.signature == b"":
-            return self
-
+    def verify_signature(self) -> None:
         public_key = Ed25519PublicKey.from_public_bytes(self.sender_pubkey)
 
         signature = self.signature
         try:
-            # Serialize the message exactly as it was before signing.
             self.signature = b""
             data = self.to_bytes()
         finally:
-            # Always restore the signature, even if an exception occurs.
             self.signature = signature
 
         try:
             public_key.verify(signature, data)
         except InvalidSignature:
             raise ValueError("Invalid signature")
-
-        return self
 
     def to_bytes(self) -> bytes:
         return self.model_dump_json().encode("utf-8")
@@ -614,6 +604,7 @@ class KademliaNode(Closable):
             sender_ip, raw_msg = await self.socket.inbox_queue.get()
             try:
                 parsed = KademliaMsg.from_bytes(raw_msg)
+                parsed.verify_signature()
             except ValueError as e:
                 # Malformed / unverifiable message (bad JSON,
                 # payload/type mismatch, ...). Drop it and keep serving.
