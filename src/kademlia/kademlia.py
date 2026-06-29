@@ -326,11 +326,16 @@ class KademliaNode(Closable):
         # Outstanding requests awaiting a reply, keyed by the request's msg_id.
         self._pending: dict[bytes, _Pending] = {}
 
-    async def resolve_peer(self, target: bytes) -> Peer | None:
+    async def resolve_peer(self, target: bytes) -> Peer:
         if target == self.node_id:
             raise ValueError("Cannot resolve own node ID")
+        if peer := self.buckets.get_peer(target):
+            return peer
         peers = await self.find_node(target)
-        return next((p for p in peers if p.id == target), None)
+        resolved = next((p for p in peers if p.id == target), None)
+        if resolved is None:
+            raise RuntimeError(f"Failed to resolve peer ID: {target}")
+        return resolved
 
     # ---- message plumbing ----------------------------------------------------
 
@@ -462,18 +467,19 @@ class KademliaNode(Closable):
         )
         await self._send(dest_ip, msg)
 
-    async def store_req(self, dest_ip: str, value: bytes, timeout: float = 5.0) -> bool:
+    async def store_req(self, peer_id: bytes, value: bytes, timeout: float = 5.0) -> bool:
         """
         Send a STORE request. Returns `False` on timeout or failure,
         returns `True` on success.
         """
+        peer = await self.resolve_peer(peer_id)
         key = hashlib.sha256(value).digest()
         msg = self._new_msg(
             msg_type=MsgType.STORE,
             payload=StorePayload(key=key, value=value)
         )
         try:
-            reply = await self.request(dest_ip, msg, timeout)
+            reply = await self.request(peer.ip, msg, timeout)
         except asyncio.TimeoutError:
             return False
         assert isinstance(reply.payload, StoreReplyPayload)
@@ -488,13 +494,15 @@ class KademliaNode(Closable):
         )
         await self._send(dest_ip, msg)
 
-    async def chat_msg_req(self, dest_ip: str, message: bytes,
+    async def chat_msg_req(self, peer_id: bytes, message: bytes,
                            content_type: Literal["text/plain"],
                            timeout: float = 5.0) -> bool:
         """
         Sends an application level CHAT MESSAGE. Returns 'True' if the recipient acknowledges it before timeout,
         'False' otherwise
         """
+        peer = await self.resolve_peer(peer_id)
+
         msg = self._new_msg(
             msg_type=MsgType.CHAT_MSG,
             payload=ChatMsgPayload(
@@ -504,14 +512,14 @@ class KademliaNode(Closable):
         )
 
         try:
-            reply = await self.request(dest_ip,msg,timeout)
+            reply = await self.request(peer.ip,msg,timeout)
         except asyncio.TimeoutError:
             return False
 
         assert isinstance(reply.payload, ChatMsgReplyPayload)
         return reply.payload.success
 
-    async def chat_msg_reply(self, dest_ip: str, in_reply_to: bytes, success: bool) -> None :
+    async def _chat_msg_reply(self, dest_ip: str, in_reply_to: bytes, success: bool) -> None :
         """
         Fire-and-forget reply to CHAT_MSG
         """
@@ -589,7 +597,7 @@ class KademliaNode(Closable):
                 sender_ip,
                 msg.payload.message
             )
-            await self.chat_msg_reply(
+            await self._chat_msg_reply(
                 dest_ip=sender_ip,
                 in_reply_to=msg.msg_id,
                 success=True
