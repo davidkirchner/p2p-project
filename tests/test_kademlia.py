@@ -475,42 +475,6 @@ async def network():
 
 
 class TestKademliaNode:
-    """Behavioural tests for the Kademlia RPC engine."""
-
-    # ---- get_k_nearest_neighbors --------------------------------------------
-
-    async def test_knn_returns_all_when_not_more_than_k(self, node: KademliaNode):
-        peers = [Peer(id=os.urandom(32), ip=f"10.0.0.{i}") for i in range(3)]
-        node.peers = peers
-        # 3 peers, k=5 -> all of them, untouched.
-        assert node.get_k_nearest_neighbors(os.urandom(32), k=5) == peers
-
-    async def test_knn_returns_closest_k_by_xor_distance(self, node: KademliaNode):
-        # Target all-zeros => XOR distance of a peer equals its own id, so the
-        # ordering is just the numeric order of the leading byte.
-        target = bytes(32)
-        ids = [5, 3, 9, 1, 7, 2]
-        node.peers = [
-            Peer(id=bytes([i]) + bytes(31), ip=f"10.0.0.{i}") for i in ids
-        ]
-
-        nearest = node.get_k_nearest_neighbors(target, k=3)
-
-        assert [p.id[0] for p in nearest] == [1, 2, 3]
-
-    async def test_knn_honours_custom_k(self, node: KademliaNode):
-        node.peers = [Peer(id=os.urandom(32), ip=f"10.0.0.{i}") for i in range(10)]
-        assert len(node.get_k_nearest_neighbors(os.urandom(32), k=4)) == 4
-
-    async def test_knn_raises_on_id_length_mismatch(self, node: KademliaNode):
-        node.peers = [
-            Peer(id=os.urandom(16), ip="10.0.0.1"),  # wrong length
-            Peer(id=os.urandom(32), ip="10.0.0.2"),
-        ]
-        # k=1 with 2 peers forces the distance computation (no early return).
-        with pytest.raises(ValueError):
-            node.get_k_nearest_neighbors(os.urandom(32), k=1)
-
     # ---- message construction / _send ---------------------------------------
 
     async def test_new_msg_is_signed_with_own_identity(self, node: KademliaNode):
@@ -620,7 +584,8 @@ class TestKademliaNode:
         assert reply.in_reply_to == req.msg_id
 
     async def test_find_node_request_returns_known_peers(self, node: KademliaNode):
-        node.peers = [Peer(id=os.urandom(32), ip="9.9.9.9")]
+        peer = Peer(id=os.urandom(32), ip="9.9.9.9")
+        node.buckets.register_successful_contact(peer.id, peer.ip)
         req = make_msg(MsgType.FIND_NODE, FindNodePayload(target=os.urandom(32)))
 
         await node.handle_msg("203.0.113.5", req)
@@ -629,7 +594,7 @@ class TestKademliaNode:
         assert reply.msg_type is MsgType.FIND_NODE_REPLY
         assert reply.in_reply_to == req.msg_id
         assert isinstance(reply.payload, FindNodeReplyPayload)
-        assert reply.payload.nodes == node.peers
+        assert reply.payload.nodes == [peer]
 
     async def test_find_value_hit_returns_value(self, node: KademliaNode):
         value = os.urandom(20)
@@ -647,7 +612,8 @@ class TestKademliaNode:
         assert reply.payload.nodes == []
 
     async def test_find_value_miss_returns_neighbors(self, node: KademliaNode):
-        node.peers = [Peer(id=os.urandom(32), ip="9.9.9.9")]
+        peer = Peer(id=os.urandom(32), ip="9.9.9.9")
+        node.buckets.register_successful_contact(peer.id, peer.ip)
         req = make_msg(MsgType.FIND_VALUE, FindValuePayload(key=os.urandom(32)))
 
         await node.handle_msg("203.0.113.5", req)
@@ -656,7 +622,7 @@ class TestKademliaNode:
         assert reply.msg_type is MsgType.FIND_VALUE_REPLY
         assert isinstance(reply.payload, FindValueReplyPayload)
         assert reply.payload.value is None
-        assert reply.payload.nodes == node.peers
+        assert reply.payload.nodes == [peer]
 
     async def test_find_value_miss_reply_is_correlatable(self, node: KademliaNode):
         req = make_msg(MsgType.FIND_VALUE, FindValuePayload(key=os.urandom(32)))
@@ -736,10 +702,11 @@ class TestKademliaNode:
     async def test_e2e_find_node_returns_peers_neighbors(self, network: FakeNetwork):
         a = network.add_node("10.0.0.1", build_node())
         b = network.add_node("10.0.0.2", build_node())
-        b.peers = [Peer(id=os.urandom(32), ip="9.9.9.9")]
+        peer = Peer(id=os.urandom(32), ip="9.9.9.9")
+        b.buckets.register_successful_contact(peer.id, peer.ip)
 
         result = await a.find_node_req("10.0.0.2", target=os.urandom(32))
-        assert result == b.peers
+        assert result == [peer]
 
     async def test_e2e_find_value_hit_returns_value(self, network: FakeNetwork):
         a = network.add_node("10.0.0.1", build_node())

@@ -326,24 +326,6 @@ class KademliaNode(Closable):
         # Outstanding requests awaiting a reply, keyed by the request's msg_id.
         self._pending: dict[bytes, _Pending] = {}
 
-    def get_k_nearest_neighbors(self, target: bytes, k: int = 5) -> list[Peer]:
-        if len(self.peers) <= k:
-            return self.peers
-
-        neighbor_distance_pairs: list[tuple[Peer, bytes]] = [] # (peer, distance)
-        for peer in self.peers:
-            if len(peer.id) != len(target):
-                raise ValueError(f"length mismatch of target id ({target.hex()}) and id "
-                                 f"of neighbor ({peer.id.hex()})")
-            distance = byte_xor(peer.id, target)
-            neighbor_distance_pairs.append((peer, distance))
-
-        # sort by distance
-        neighbor_distance_pairs.sort(key=lambda x: x[1])
-        # return the k-nearest neighbors
-        return [x[0] for x in neighbor_distance_pairs[:k]]
-
-
     # ---- message plumbing ----------------------------------------------------
 
     def _new_msg(self, msg_type: MsgType, payload: Payload, in_reply_to: bytes | None = None) -> KademliaMsg:
@@ -427,7 +409,7 @@ class KademliaNode(Closable):
         msg = self._new_msg(
             msg_type=MsgType.FIND_NODE_REPLY,
             payload=FindNodeReplyPayload(
-                nodes=self.get_k_nearest_neighbors(target)
+                nodes=self.buckets.get_k_nearest_neighbors(target)
             ),
             in_reply_to=in_reply_to
         )
@@ -582,7 +564,7 @@ class KademliaNode(Closable):
                 await self.find_value_reply(
                     dest_ip=sender_ip,
                     in_reply_to=msg.msg_id,
-                    neighbors=self.get_k_nearest_neighbors(msg.payload.key)
+                    neighbors=self.buckets.get_k_nearest_neighbors(msg.payload.key)
                 )
         elif msg.msg_type is MsgType.CHAT_MSG:
             assert isinstance(msg.payload, ChatMsgPayload)
