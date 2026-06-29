@@ -705,7 +705,7 @@ class TestKademliaNode:
         peer = Peer(id=os.urandom(32), ip="9.9.9.9")
         b.buckets.register_successful_contact(peer.id, peer.ip)
 
-        result = await a.find_node_req("10.0.0.2", target=os.urandom(32))
+        result = await a._find_node_req("10.0.0.2", target=os.urandom(32))
         assert result == [peer]
 
     async def test_e2e_find_value_hit_returns_value(self, network: FakeNetwork):
@@ -715,6 +715,6 @@ class TestKademliaNode:
         key = os.urandom(32)
         b.dht[key] = value
 
-        reply = await a.find_value_req("10.0.0.2", key=key)
+        reply = await a._find_value_req("10.0.0.2", key=key)
         assert reply is not None
         assert reply.value == value

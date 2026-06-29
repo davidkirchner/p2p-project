@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 # Network-wide well-known port.
 KADEMLIA_PORT = 9009
 ID_SPACE = 256 # bit
+ALPHA = 3
 
 
 def kademlia_key(data: bytes) -> KademliaKey:
@@ -321,10 +322,15 @@ class KademliaNode(Closable):
         self.encryption = encryption
         self.buckets = Buckets(node_id, self._fire_ping)
         self.loop = asyncio.get_running_loop()
-        self.peers: list[Peer] = []     # TODO: store this in a more appropriate way
         self.dht: dict[bytes, Any] = {} # TODO: store this in a more appropriate way
         # Outstanding requests awaiting a reply, keyed by the request's msg_id.
         self._pending: dict[bytes, _Pending] = {}
+
+    async def resolve_peer(self, target: bytes) -> Peer | None:
+        if target == self.node_id:
+            raise ValueError("Cannot resolve own node ID")
+        peers = await self.find_node(target)
+        return next((p for p in peers if p.id == target), None)
 
     # ---- message plumbing ----------------------------------------------------
 
@@ -377,7 +383,7 @@ class KademliaNode(Closable):
         except asyncio.TimeoutError:
             return False
 
-    async def pong(self, dest_ip: str, in_reply_to: bytes) -> None:
+    async def _pong(self, dest_ip: str, in_reply_to: bytes) -> None:
         """Fire-and-forget reply to a PING."""
         await self._send(dest_ip, self._new_msg(MsgType.PONG, PongPayload(), in_reply_to=in_reply_to))
 
@@ -388,7 +394,11 @@ class KademliaNode(Closable):
         """
         self.bind_closable(self.ping(dest_ip=dest_ip))
 
-    async def find_node_req(self, dest_ip: str, target: bytes, timeout: float = 5.0) -> list[Peer] | None:
+    async def find_node(self, target: bytes) -> list[Peer]:
+        from .lookup import NodeLookup
+        return await NodeLookup(self, target).run()
+
+    async def _find_node_req(self, dest_ip: str, target: bytes, timeout: float = 5.0) -> list[Peer] | None:
         """
         Send a FIND_NODE request and wait for the reply. Returns `list[Peer]` if reply
         arrives on time, `None` otherwise.
@@ -404,7 +414,7 @@ class KademliaNode(Closable):
         assert isinstance(reply.payload, FindNodeReplyPayload)
         return reply.payload.nodes
 
-    async def find_node_reply(self, dest_ip: str, in_reply_to: bytes, target: bytes) -> None:
+    async def _find_node_reply(self, dest_ip: str, in_reply_to: bytes, target: bytes) -> None:
         """Fire-and-foreget reply to FIND_NODE"""
         msg = self._new_msg(
             msg_type=MsgType.FIND_NODE_REPLY,
@@ -415,7 +425,12 @@ class KademliaNode(Closable):
         )
         await self._send(dest_ip, msg)
 
-    async def find_value_req(self, dest_ip: str, key: bytes, timeout: float = 5.0) -> None | FindValueReplyPayload:
+    async def find_value(self, key: bytes) -> bytes | list[Peer]:
+        from .lookup import ValueLookup
+        return await ValueLookup(self, key).run()
+
+
+    async def _find_value_req(self, dest_ip: str, key: bytes, timeout: float = 5.0) -> None | FindValueReplyPayload:
         """
         Send a FIND_VALUE request. Returns `None` on timeout, `FindValueReplyPayload` otherwise.
         """
@@ -430,7 +445,7 @@ class KademliaNode(Closable):
         assert isinstance(reply.payload, FindValueReplyPayload)
         return reply.payload
 
-    async def find_value_reply(self, dest_ip: str, in_reply_to: bytes, value: bytes | None = None, neighbors: list[Peer] | None = None) -> None:
+    async def _find_value_reply(self, dest_ip: str, in_reply_to: bytes, value: bytes | None = None, neighbors: list[Peer] | None = None) -> None:
         """Fire-and-forget reply to FIND_VALUE"""
         if value is None and neighbors is None:
             raise ValueError("Either value or neighbors must be given as an argument.")
@@ -464,7 +479,7 @@ class KademliaNode(Closable):
         assert isinstance(reply.payload, StoreReplyPayload)
         return reply.payload.success
 
-    async def store_reply(self, dest_ip: str, in_reply_to: bytes, success: bool) -> None:
+    async def _store_reply(self, dest_ip: str, in_reply_to: bytes, success: bool) -> None:
         """Fire-and-forget reply to STORE"""
         msg = self._new_msg(
             msg_type=MsgType.STORE_REPLY,
@@ -534,10 +549,10 @@ class KademliaNode(Closable):
 
         # Requests:
         if msg.msg_type is MsgType.PING:
-            await self.pong(dest_ip=sender_ip, in_reply_to=msg.msg_id)
+            await self._pong(dest_ip=sender_ip, in_reply_to=msg.msg_id)
         elif msg.msg_type is MsgType.FIND_NODE:
             assert isinstance(msg.payload, FindNodePayload)
-            await self.find_node_reply(
+            await self._find_node_reply(
                 dest_ip=sender_ip,
                 in_reply_to=msg.msg_id,
                 target=msg.payload.target
@@ -545,7 +560,7 @@ class KademliaNode(Closable):
         elif msg.msg_type is MsgType.STORE:
             assert isinstance(msg.payload, StorePayload)
             self.dht[msg.payload.key] = msg.payload.value
-            await self.store_reply(
+            await self._store_reply(
                 dest_ip=sender_ip,
                 in_reply_to=msg.msg_id,
                 success=True
@@ -554,14 +569,14 @@ class KademliaNode(Closable):
             assert isinstance(msg.payload, FindValuePayload)
             # value exists in local dht => send the value
             if msg.payload.key in self.dht:
-                await self.find_value_reply(
+                await self._find_value_reply(
                     dest_ip=sender_ip,
                     in_reply_to=msg.msg_id,
                     value=self.dht[msg.payload.key]
                 )
             # value doesn't exist in local dht => send k-nearest neigbors
             else:
-                await self.find_value_reply(
+                await self._find_value_reply(
                     dest_ip=sender_ip,
                     in_reply_to=msg.msg_id,
                     neighbors=self.buckets.get_k_nearest_neighbors(msg.payload.key)
