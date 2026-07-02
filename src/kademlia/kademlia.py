@@ -1,8 +1,8 @@
-import uuid, base64, hashlib, logging, asyncio
+import uuid, hashlib, logging, asyncio
 from dataclasses import dataclass
 from enum import Enum
-from typing import Annotated, Any, Callable, Literal, NewType, Self
-from pydantic import BaseModel, Field, BeforeValidator, PlainSerializer, SerializeAsAny, model_validator
+from typing import Any, Callable, Literal, Self
+from pydantic import BaseModel, Field, SerializeAsAny, model_validator
 from encryption import UserEncryption
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.exceptions import InvalidSignature
@@ -187,7 +187,7 @@ class Contact:
     ip: str
     fail_counter: int = 0
 
-type OnNeedsPing = Callable[[str], None]
+type OnNeedsPing = Callable[[bytes, str], None]
 
 class Buckets:
     def __init__(self, node_id: bytes, on_needs_ping: OnNeedsPing, k=10) -> None:
@@ -253,7 +253,7 @@ class Buckets:
         if not cache:
             return
         next_candidate_id = next(reversed(cache))
-        self.on_needs_ping(cache[next_candidate_id].ip)
+        self.on_needs_ping(next_candidate_id, cache[next_candidate_id].ip)
 
     def register_failure(self, peer_id: bytes) -> None:
         bucket = self._bucket_for(peer_id)
@@ -320,7 +320,7 @@ class KademliaNode(Closable):
         self.pubkey = pubkey
         self.port = port
         self.encryption = encryption
-        self.buckets = Buckets(node_id, self._fire_ping)
+        self.buckets = Buckets(node_id, self._ping_with_buckets_side_effect)
         self.loop = asyncio.get_running_loop()
         self.dht: dict[bytes, Any] = {} # TODO: store this in a more appropriate way
         # Outstanding requests awaiting a reply, keyed by the request's msg_id.
@@ -357,7 +357,7 @@ class KademliaNode(Closable):
         """Fire-and-forget primitive: hand a message to the socket outbox."""
         await self.socket.outbox_queue.put((dest_ip, KADEMLIA_PORT, msg.to_bytes()))
 
-    async def request(self, dest_ip: str, msg: KademliaMsg, timeout: float = 5.0) -> KademliaMsg:
+    async def request(self, *, msg: KademliaMsg, dest_ip: str | None = None, peer_id: bytes | None = None, timeout: float = 5.0) -> KademliaMsg:
         """Send ``msg`` and wait for the reply whose in_reply_to == msg.msg_id.
 
         Built on top of the fire-and-forget ``_send``: it registers a future
@@ -365,13 +365,20 @@ class KademliaNode(Closable):
         the matching reply arrives. Raises ``asyncio.TimeoutError`` if no reply
         comes within ``timeout`` seconds.
         """
+        if dest_ip is None and peer_id is None:
+            raise ValueError(f"Provide dest_ip or peer_id or both when calling {self.request.__name__}")
+        if dest_ip is None:
+            assert peer_id
+            dest_ip = (await self.resolve_peer(peer_id)).ip
+
         fut: asyncio.Future[KademliaMsg] = self.loop.create_future()
         self._pending[msg.msg_id] = _Pending(fut, dest_ip, REPLY_TYPES[msg.msg_type])
         try:
             await self._send(dest_ip, msg)
             return await asyncio.wait_for(fut, timeout)
         except TimeoutError as e:
-            # TODO: register failure in buckets
+            if peer_id is not None:
+                self.buckets.register_failure(peer_id)
             raise e
         finally:
             # Always drop the registration, also on timeout/cancellation.
@@ -379,41 +386,47 @@ class KademliaNode(Closable):
 
     # ---- RPCs ----------------------------------------------------------------
 
-    async def ping(self, dest_ip: str, timeout: float = 5.0) -> bool:
+    async def ping(self, peer_id: bytes, timeout: float = 5.0) -> bool:
         """Send a PING and wait for the PONG. True if it arrives in time."""
         msg = self._new_msg(MsgType.PING, PingPayload())
         try:
-            await self.request(dest_ip, msg, timeout)
+            await self.request(msg=msg, peer_id=peer_id, timeout=timeout)
             return True
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, RuntimeError):
             return False
 
     async def _pong(self, dest_ip: str, in_reply_to: bytes) -> None:
         """Fire-and-forget reply to a PING."""
         await self._send(dest_ip, self._new_msg(MsgType.PONG, PongPayload(), in_reply_to=in_reply_to))
 
-    def _fire_ping(self, dest_ip: str) -> None:
+    def _ping_with_buckets_side_effect(self, peer_id: bytes, dest_ip: str) -> None:
         """
-        Sync callback for the asyncio-free ``Buckets``. ``Buckets`` calls
-        this function when it needs to verify a peer's liveness.
+        Sync ping callback for Buckets. Will be called for peers that may not be in
+        a bucket yet, but IP is known. Calls `request` with both peer_id and dest_ip so `request`
+        is able to register failed contact for Buckets.
         """
-        self.bind_closable(self.ping(dest_ip=dest_ip))
+        async def _ping():
+            msg = self._new_msg(MsgType.PING, PingPayload())
+            await self.request(msg=msg, peer_id=peer_id, dest_ip=dest_ip)
+
+        self.bind_closable(_ping())
 
     async def find_node(self, target: bytes) -> list[Peer]:
         from .lookup import NodeLookup
         return await NodeLookup(self, target).run()
 
-    async def _find_node_req(self, dest_ip: str, target: bytes, timeout: float = 5.0) -> list[Peer] | None:
+    async def _find_node_req(self, dest_ip: str, target: bytes, timeout: float = 5.0, peer_id: bytes | None = None) -> list[Peer] | None:
         """
         Send a FIND_NODE request and wait for the reply. Returns `list[Peer]` if reply
         arrives on time, `None` otherwise.
+        Provide `peer_id` if possibel, so `request` can register possible failures in Buckets.
         """
         msg = self._new_msg(
             msg_type=MsgType.FIND_NODE,
             payload=FindNodePayload(target=target),
         )
         try:
-            reply = await self.request(dest_ip, msg, timeout)
+            reply = await self.request(dest_ip=dest_ip, peer_id=peer_id, msg=msg, timeout=timeout)
         except asyncio.TimeoutError:
             return None
         assert isinstance(reply.payload, FindNodeReplyPayload)
@@ -435,7 +448,7 @@ class KademliaNode(Closable):
         return await ValueLookup(self, key).run()
 
 
-    async def _find_value_req(self, dest_ip: str, key: bytes, timeout: float = 5.0) -> None | FindValueReplyPayload:
+    async def _find_value_req(self, dest_ip: str, peer_id: bytes, key: bytes, timeout: float = 5.0) -> None | FindValueReplyPayload:
         """
         Send a FIND_VALUE request. Returns `None` on timeout, `FindValueReplyPayload` otherwise.
         """
@@ -444,7 +457,7 @@ class KademliaNode(Closable):
             payload=FindValuePayload(key=key),
         )
         try:
-            reply = await self.request(dest_ip, msg, timeout)
+            reply = await self.request(dest_ip=dest_ip, peer_id=peer_id, msg=msg, timeout=timeout)
         except asyncio.TimeoutError:
             return None
         assert isinstance(reply.payload, FindValueReplyPayload)
@@ -479,7 +492,7 @@ class KademliaNode(Closable):
             payload=StorePayload(key=key, value=value)
         )
         try:
-            reply = await self.request(peer.ip, msg, timeout)
+            reply = await self.request(dest_ip=peer.ip, msg=msg, timeout=timeout)
         except asyncio.TimeoutError:
             return False
         assert isinstance(reply.payload, StoreReplyPayload)
@@ -512,7 +525,7 @@ class KademliaNode(Closable):
         )
 
         try:
-            reply = await self.request(peer.ip,msg,timeout)
+            reply = await self.request(dest_ip=peer.ip, msg=msg, timeout=timeout)
         except asyncio.TimeoutError:
             return False
 
@@ -531,28 +544,38 @@ class KademliaNode(Closable):
         await self._send(dest_ip,msg)
 
 
-    # ---- dispatch ------------------------------------------------------------
+
+    def _is_valid_reply(self, sender_ip: str, msg: KademliaMsg) -> bool:
+        if not msg.in_reply_to:
+            return False
+        pending = self._pending.get(msg.in_reply_to)
+        if pending is None:
+            # No one is waiting: late, duplicate, or unwanted reply.
+            return False
+        # A matching msg_id is not enough: the reply must come from the peer
+        # we actually queried and carry the reply type we expect. Otherwise
+        # ignore it and keep waiting (a spoofed/wrong reply must not resolve
+        # the request) until the real one arrives or the request times out.
+        if sender_ip != pending.peer_ip or msg.msg_type is not pending.reply_type:
+            logger.warning(
+                "Dropping mismatched reply to %s from %s (type=%s; expected %s from %s)",
+                msg.in_reply_to.hex(), sender_ip, msg.msg_type.value,
+                pending.reply_type.value, pending.peer_ip,
+            )
+            return False
+        return True
+
 
     async def handle_msg(self, sender_ip: str, msg: KademliaMsg):
         # Replies are correlated back to whoever is awaiting their request.
         if msg.in_reply_to is not None:
+            if not self._is_valid_reply(sender_ip, msg):
+                return
             pending = self._pending.get(msg.in_reply_to)
-            if pending is None:
-                # No one is waiting: late, duplicate, or unsolicited reply.
-                return
-            # A matching msg_id is not enough: the reply must come from the peer
-            # we actually queried and carry the reply type we expect. Otherwise
-            # ignore it and keep waiting (a spoofed/wrong reply must not resolve
-            # the request) until the real one arrives or the request times out.
-            if sender_ip != pending.peer_ip or msg.msg_type is not pending.reply_type:
-                logger.warning(
-                    "Dropping mismatched reply to %s from %s (type=%s; expected %s from %s)",
-                    msg.in_reply_to.hex(), sender_ip, msg.msg_type.value,
-                    pending.reply_type.value, pending.peer_ip,
-                )
-                return
+            assert pending # _is_valid_reply ensures pending is not None
             if not pending.future.done():
                 pending.future.set_result(msg)
+            self.buckets.register_successful_contact(msg.sender_id, sender_ip)
             return
 
         # Requests:
@@ -592,16 +615,15 @@ class KademliaNode(Closable):
         elif msg.msg_type is MsgType.CHAT_MSG:
             assert isinstance(msg.payload, ChatMsgPayload)
             # TODO: Forward the message to the application/UI layer.
-            logger.debug(
-                "Received chat message from %s: %s",
-                sender_ip,
-                msg.payload.message
-            )
             await self._chat_msg_reply(
                 dest_ip=sender_ip,
                 in_reply_to=msg.msg_id,
                 success=True
             )
+        else:
+            logger.debug(f"Received message with unknown msg_type: {msg}")
+            return
+        self.buckets.register_successful_contact(msg.sender_id, sender_ip)
 
 
     async def recv_loop(self):

@@ -154,10 +154,12 @@ def generate_contact_ids(bucket_index: int, count: int) -> list[bytes]:
     return [peer_id_at(first_distance + i) for i in range(count)]
 
 
-def make_buckets(k: int = 10) -> tuple[Buckets, list[str]]:
+def make_buckets(k: int = 10) -> tuple[Buckets, list[tuple[bytes, str]]]:
     """A Buckets instance plus the list its on_needs_ping callback appends to."""
-    pinged: list[str] = []
-    return Buckets(NODE_ID, pinged.append, k=k), pinged
+    pinged: list[tuple[bytes, str]] = []
+    def on_needs_ping(peer_id: bytes, dest_ip: str):
+        pinged.append((peer_id, dest_ip))
+    return Buckets(NODE_ID, on_needs_ping, k=k), pinged
 
 
 class TestBuckets:
@@ -283,12 +285,12 @@ class TestBuckets:
         for _ in range(buckets.failure_remove_threshold):
             buckets.register_failure(a)
 
-        assert pings == ["10.0.0.4"]
+        assert [p[1] for p in pings] == ["10.0.0.4"]
         buckets.register_failure(d) # doesn't answer ping
         assert d not in cache
         assert d not in bucket
 
-        assert pings == ["10.0.0.4", "10.0.0.3"]
+        assert [p[1] for p in pings] == ["10.0.0.4", "10.0.0.3"]
         buckets.register_successful_contact(c, "10.0.0.3")
         assert c not in cache
         assert c in bucket
@@ -324,7 +326,7 @@ class TestBuckets:
 
         # The freed slot triggers a ping to the waiting candidate so it can be
         # promoted once it answers.
-        assert pinged == ["10.0.0.3"]
+        assert [p[1] for p in pinged] == ["10.0.0.3"]
 
     def test_eviction_without_candidate_pings_nothing(self):
         buckets, pinged = make_buckets()
@@ -503,12 +505,14 @@ class TestKademliaNode:
     async def test_request_times_out_and_cleans_up_pending(self, node: KademliaNode):
         msg = node._new_msg(MsgType.PING, PingPayload())
         with pytest.raises(asyncio.TimeoutError):
-            await node.request("198.51.100.1", msg, timeout=0.01)
+            await node.request(dest_ip="198.51.100.1", msg=msg, timeout=0.01)
         # The outstanding-request registration must be gone after a timeout.
         assert msg.msg_id not in node._pending
 
     async def test_ping_returns_false_on_timeout(self, node: KademliaNode):
-        assert await node.ping("198.51.100.1", timeout=0.01) is False
+        peer_id = os.urandom(32)
+        node.buckets.register_successful_contact(peer_id, "198.51.100.1")
+        assert await node.ping(peer_id, timeout=0.01) is False
 
     # ---- handle_msg: reply correlation rules --------------------------------
 
@@ -684,13 +688,16 @@ class TestKademliaNode:
 
     async def test_e2e_ping_succeeds(self, network: FakeNetwork):
         a = network.add_node("10.0.0.1", build_node())
-        network.add_node("10.0.0.2", build_node())
-        assert await a.ping("10.0.0.2") is True
+        b = network.add_node("10.0.0.2", build_node())
+        a.buckets.register_successful_contact(b.node_id, "10.0.0.2")
+        assert await a.ping(b.node_id) is True
 
     async def test_e2e_ping_unknown_host_times_out(self, network: FakeNetwork):
         a = network.add_node("10.0.0.1", build_node())
+        peer_id = os.urandom(32)
         # Nobody at this address -> no PONG -> timeout -> False.
-        assert await a.ping("10.0.0.250", timeout=0.05) is False
+        a.buckets.register_successful_contact(peer_id, "10.0.0.250")
+        assert await a.ping(peer_id, timeout=0.05) is False
 
     async def test_e2e_store_replicates_to_peer(self, network: FakeNetwork):
         a = network.add_node("10.0.0.1", build_node())
@@ -720,6 +727,7 @@ class TestKademliaNode:
         b = network.add_node("10.0.0.2", build_node())
         peer = Peer(id=os.urandom(32), ip="9.9.9.9")
         b.buckets.register_successful_contact(peer.id, peer.ip)
+        a.buckets.register_successful_contact(b.node_id, "10.0.0.2")
 
         result = await a._find_node_req("10.0.0.2", target=os.urandom(32))
         assert result == [peer]
@@ -731,7 +739,7 @@ class TestKademliaNode:
         key = os.urandom(32)
         b.dht[key] = value
 
-        reply = await a._find_value_req("10.0.0.2", key=key)
+        reply = await a._find_value_req( "10.0.0.2", b.node_id, key=key)
         assert reply is not None
         assert reply.value == value
 
@@ -810,7 +818,7 @@ class TestNodeLookup:
             "10.9.9.12": [],
         }
 
-        async def fake_find_node_req(ip, target):
+        async def fake_find_node_req(ip, target, peer_id=None):
             assert target == TARGET
             return replies_by_ip.get(ip, [])
 
@@ -828,7 +836,7 @@ class TestNodeLookup:
             "10.9.9.3": []
         }
 
-        async def fake_find_node_req(ip, target):
+        async def fake_find_node_req(ip, target, peer_id=None):
             return replies_by_ip.get(ip, [])
 
         node._find_node_req = AsyncMock(side_effect=fake_find_node_req)
@@ -888,9 +896,9 @@ class TestValueLookup:
             "10.9.9.1": FindValueReplyPayload(value=b"the-value"),
         }
 
-        async def fake_find_value_req(ip, key):
+        async def fake_find_value_req(dest_ip, peer_id, key):
             assert key == TARGET
-            return replies_by_ip.get(ip)
+            return replies_by_ip.get(dest_ip)
 
         node._find_value_req = AsyncMock(side_effect=fake_find_value_req)
 
@@ -906,8 +914,8 @@ class TestValueLookup:
             "10.9.9.4": FindValueReplyPayload(nodes=[create_peer_from_dist(100)]),
         }
 
-        async def fake_find_value_req(ip, key):
-            return replies_by_ip.get(ip, FindValueReplyPayload(nodes=[]))
+        async def fake_find_value_req(dest_ip, peer_id, key):
+            return replies_by_ip.get(dest_ip, FindValueReplyPayload(nodes=[]))
 
         node._find_value_req = AsyncMock(side_effect=fake_find_value_req)
 

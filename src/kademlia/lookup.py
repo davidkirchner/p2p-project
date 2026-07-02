@@ -98,7 +98,7 @@ class NodeLookup(IterativeLookup[list[Peer]]):
         self._node = node
 
     async def _query_peer(self, peer: Peer):
-        return await self._node._find_node_req(peer.ip, self.target)
+        return await self._node._find_node_req(peer.ip, self.target, peer_id=peer.id)
 
     def _handle_reply(self, result) -> ReplyOutcome:
         improved = self._add_peers(result or [])
@@ -116,7 +116,7 @@ class ValueLookup(IterativeLookup[bytes]):
         self._value: bytes | None = None
 
     async def _query_peer(self, peer: Peer):
-        return await self._node._find_value_req(peer.ip, self.target)
+        return await self._node._find_value_req(dest_ip=peer.ip, peer_id=peer.id, key=self.target)
 
     def _handle_reply(self, result: FindValueReplyPayload | None) -> ReplyOutcome:
         if result is None:
