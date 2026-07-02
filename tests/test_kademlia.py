@@ -30,6 +30,7 @@ from kademlia.kademlia import (
     FindValueReplyPayload,
     _Pending,
 )
+from kademlia.lookup import NodeLookup, ValueLookup, ReplyOutcome
 from socket_handler import SocketHandler
 
 # The tests drive a node purely through the SocketHandler's two queues and never
@@ -733,3 +734,182 @@ class TestKademliaNode:
         reply = await a._find_value_req("10.0.0.2", key=key)
         assert reply is not None
         assert reply.value == value
+
+
+# =============================================================================
+# NodeLookup / ValueLookup tests
+# =============================================================================
+
+TARGET = NODE_ID  # all zeros; distance-to-target == int value of a peer id
+
+
+def create_peer_from_dist(distance: int) -> Peer:
+    """A Peer at a known XOR distance from TARGET, with a matching ip."""
+    return Peer(id=peer_id_at(distance), ip=f"10.9.9.{distance}")
+
+
+def seed(node: KademliaNode, *distances: int) -> None:
+    """Put peers at the given distances into the node's routing table."""
+    for d in distances:
+        p = create_peer_from_dist(d)
+        node.buckets.register_successful_contact(p.id, p.ip)
+
+
+def distances_of(peers: list[Peer]) -> list[int]:
+    return [int.from_bytes(p.id) for p in peers]
+
+
+class TestNodeLookup:
+    # ---- _add_peers ----------------------------------------------------------
+
+    async def test_add_peers_reports_progress_only_when_set_changes(self, node: KademliaNode):
+        lookup = NodeLookup(node, TARGET)
+        assert lookup._add_peers([create_peer_from_dist(5)]) is True   # new peer -> progress
+        assert lookup._add_peers([create_peer_from_dist(5)]) is False  # already known -> none
+
+    async def test_add_peers_keeps_only_k_closest(self, node: KademliaNode):
+        node.buckets.k = 2
+        lookup = NodeLookup(node, TARGET)
+        lookup._add_peers([create_peer_from_dist(9), create_peer_from_dist(1), create_peer_from_dist(5)])
+        # Only the two closest to TARGET survive.
+        assert distances_of(lookup._sorted()) == [1, 5]
+
+    async def test_add_peers_excludes_own_node_id(self, node: KademliaNode):
+        lookup = NodeLookup(node, TARGET)
+        own = Peer(id=node.node_id, ip="10.0.0.1")
+        lookup._add_peers([own, create_peer_from_dist(7)])
+        assert node.node_id not in lookup.nearest
+        assert peer_id_at(7) in lookup.nearest
+
+    # ---- _handle_reply / _result --------------------------------------------
+
+    async def test_handle_reply_maps_to_progress_outcome(self, node: KademliaNode):
+        lookup = NodeLookup(node, TARGET)
+        assert lookup._handle_reply([create_peer_from_dist(3)]) is ReplyOutcome.PROGRESS
+        # Same peer again teaches nothing new.
+        assert lookup._handle_reply([create_peer_from_dist(3)]) is ReplyOutcome.NO_PROGRESS
+        # A timed-out RPC surfaces as None and must be treated as no progress.
+        assert lookup._handle_reply(None) is ReplyOutcome.NO_PROGRESS
+
+    async def test_result_is_sorted_by_distance_to_target(self, node: KademliaNode):
+        lookup = NodeLookup(node, TARGET)
+        lookup._add_peers([create_peer_from_dist(9), create_peer_from_dist(1), create_peer_from_dist(4)])
+        assert distances_of(lookup._result()) == [1, 4, 9]
+
+    # ---- run() ---------------------------------------------------------------
+
+    async def test_run_converges_towards_closer_peers(self, node: KademliaNode):
+        # Start knowing only far peers; each far peer reveals closer ones, which
+        # in turn reveal the closest.
+        seed(node, 100, 101)
+        replies_by_ip = {
+            "10.9.9.100": [create_peer_from_dist(10), create_peer_from_dist(11)],
+            "10.9.9.101": [create_peer_from_dist(10), create_peer_from_dist(12)],
+            "10.9.9.10": [create_peer_from_dist(1)],
+            "10.9.9.11": [create_peer_from_dist(2)],
+            "10.9.9.12": [],
+        }
+
+        async def fake_find_node_req(ip, target):
+            assert target == TARGET
+            return replies_by_ip.get(ip, [])
+
+        node._find_node_req = AsyncMock(side_effect=fake_find_node_req)
+
+        result = await NodeLookup(node, TARGET).run()
+
+        assert distances_of(result)[:2] == [1, 2]
+        assert set(distances_of(result)) == {1, 2, 10, 11, 12, 100, 101}
+
+    async def test_run_queries_each_peer_at_most_once(self, node: KademliaNode):
+        seed(node, 50)
+        replies_by_ip = {
+            "10.9.9.50": [create_peer_from_dist(50), create_peer_from_dist(3)],
+            "10.9.9.3": []
+        }
+
+        async def fake_find_node_req(ip, target):
+            return replies_by_ip.get(ip, [])
+
+        node._find_node_req = AsyncMock(side_effect=fake_find_node_req)
+
+        await NodeLookup(node, TARGET).run()
+
+        queried = [call.args[0] for call in node._find_node_req.call_args_list]
+        assert sorted(queried) == ["10.9.9.3", "10.9.9.50"]
+
+    async def test_run_with_empty_routing_table_returns_empty(self, node: KademliaNode):
+        node._find_node_req = AsyncMock()
+        result = await NodeLookup(node, TARGET).run()
+        assert result == []
+        node._find_node_req.assert_not_called()
+
+
+class TestValueLookup:
+    # ---- _handle_reply -------------------------------------------------------
+
+    async def test_handle_reply_stops_and_captures_value(self, node: KademliaNode):
+        lookup = ValueLookup(node, TARGET)
+        outcome = lookup._handle_reply(FindValueReplyPayload(value=b"hit"))
+        assert outcome is ReplyOutcome.STOP
+        assert lookup._value == b"hit"
+
+    async def test_handle_reply_none_is_no_progress(self, node: KademliaNode):
+        lookup = ValueLookup(node, TARGET)
+        assert lookup._handle_reply(None) is ReplyOutcome.NO_PROGRESS
+
+    async def test_handle_reply_nodes_report_progress(self, node: KademliaNode):
+        lookup = ValueLookup(node, TARGET)
+        reply = FindValueReplyPayload(nodes=[create_peer_from_dist(3)])
+        assert lookup._handle_reply(reply) is ReplyOutcome.PROGRESS
+        # already known -> no progress
+        assert lookup._handle_reply(reply) is ReplyOutcome.NO_PROGRESS
+
+    # ---- _result -------------------------------------------------------------
+
+    async def test_result_returns_value_when_found(self, node: KademliaNode):
+        lookup = ValueLookup(node, TARGET)
+        lookup._add_peers([create_peer_from_dist(1)])
+        lookup._value = b"payload"
+        assert lookup._result() == b"payload"
+
+    async def test_result_raises_when_value_never_found(self, node: KademliaNode):
+        lookup = ValueLookup(node, TARGET)
+        lookup._add_peers([create_peer_from_dist(9), create_peer_from_dist(2)])
+        with pytest.raises(ValueError):
+            lookup._result()
+
+    # ---- run() ---------------------------------------------------------------
+
+    async def test_run_returns_value_and_stops_early(self, node: KademliaNode):
+        seed(node, 100)
+        replies_by_ip = {
+            "10.9.9.100": FindValueReplyPayload(nodes=[create_peer_from_dist(1)]),
+            "10.9.9.1": FindValueReplyPayload(value=b"the-value"),
+        }
+
+        async def fake_find_value_req(ip, key):
+            assert key == TARGET
+            return replies_by_ip.get(ip)
+
+        node._find_value_req = AsyncMock(side_effect=fake_find_value_req)
+
+        result = await ValueLookup(node, TARGET).run()
+        assert result == b"the-value"
+
+    async def test_run_raises_when_value_is_nowhere(self, node: KademliaNode):
+        # No peer has the value: the lookup exhausts its candidates and fails
+        # with a ValueError rather than returning the peers it visited.
+        seed(node, 100)
+        replies_by_ip = {
+            "10.9.9.100": FindValueReplyPayload(nodes=[create_peer_from_dist(4)]),
+            "10.9.9.4": FindValueReplyPayload(nodes=[create_peer_from_dist(100)]),
+        }
+
+        async def fake_find_value_req(ip, key):
+            return replies_by_ip.get(ip, FindValueReplyPayload(nodes=[]))
+
+        node._find_value_req = AsyncMock(side_effect=fake_find_value_req)
+
+        with pytest.raises(ValueError):
+            await ValueLookup(node, TARGET).run()

@@ -108,9 +108,10 @@ class NodeLookup(IterativeLookup[list[Peer]]):
         return self._sorted()
 
 
-class ValueLookup(IterativeLookup[bytes | list[Peer]]):
+class ValueLookup(IterativeLookup[bytes]):
     def __init__(self, node: KademliaNode, key: bytes) -> None:
         super().__init__(node.buckets, node.node_id, key)
+        self._key = key
         self._node = node
         self._value: bytes | None = None
 
@@ -126,5 +127,7 @@ class ValueLookup(IterativeLookup[bytes | list[Peer]]):
         improved = self._add_peers(result.nodes)
         return ReplyOutcome.PROGRESS if improved else ReplyOutcome.NO_PROGRESS
 
-    def _result(self) -> bytes | list[Peer]:
-        return self._value if self._value is not None else self._sorted()
+    def _result(self) -> bytes:
+        if self._value is None:
+            raise ValueError(f"Unable to find value for key {self._key} in the network")
+        return self._value
