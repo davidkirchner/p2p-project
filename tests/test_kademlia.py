@@ -6,6 +6,7 @@ import contextlib
 import pytest
 from typing import Any
 from uuid import uuid4
+from unittest.mock import AsyncMock
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
@@ -693,10 +694,24 @@ class TestKademliaNode:
     async def test_e2e_store_replicates_to_peer(self, network: FakeNetwork):
         a = network.add_node("10.0.0.1", build_node())
         b = network.add_node("10.0.0.2", build_node())
+
+        async def _resolve(target: bytes) -> Peer:
+            if target == a.node_id:
+                return Peer(id=a.node_id, ip="10.0.0.1")
+            if target == b.node_id:
+                return Peer(id=b.node_id, ip="10.0.0.2")
+            raise ValueError
+
+        mocked_resolve_peer = AsyncMock()
+        mocked_resolve_peer.side_effect = _resolve
+
+        a.resolve_peer = mocked_resolve_peer
+        b.resolve_peer = mocked_resolve_peer
+
         value = os.urandom(64)
 
         # The value does reach b's DHT, but the ack never correlates back.
-        assert await a.store_req("10.0.0.2", value) is True
+        assert await a.store_req(b.node_id, value) is True
         assert b.dht[hashlib.sha256(value).digest()] == value
 
     async def test_e2e_find_node_returns_peers_neighbors(self, network: FakeNetwork):
