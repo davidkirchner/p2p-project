@@ -40,10 +40,6 @@ class Peer(BaseModel):
     ip: str
 
 
-# ---- Payloads per MessageType ------------------------------------------------
-# Each payload model knows only its own fields and handles its binary fields
-# itself (via B64Bytes). The transport logic (to_bytes/from_bytes) stays
-# generic in KademliaMsg.
 
 class Payload(BaseModel):
     """Base class for all payloads."""
@@ -124,8 +120,8 @@ class KademliaMsg(BaseModel):
     in_reply_to: B64Bytes | None = None # reference the msg_id of the request
     sender_id: B64Bytes      # node ID = sha256(pubkey)
     sender_pubkey: B64Bytes  # raw public key
-    signature: B64Bytes      # this is not generated/ checked yet
-    payload: SerializeAsAny[Payload]  # serialize by runtime type, not by Payload
+    signature: B64Bytes
+    payload: SerializeAsAny[Payload]
 
     @model_validator(mode="before")
     @classmethod
@@ -306,11 +302,9 @@ class _Pending:
     reply_type: MsgType
 
 class KademliaNode(Closable):
-    """Kademlia RPC engine sitting on top of the SocketHandler queues.
-
-    Reads incoming messages from ``socket.inbox_queue`` as ``(sender_ip, data)``,
-    dispatches by ``msg_type``, and puts replies on ``socket.outbox_queue`` as
-    ``(dest_ip, dest_port, data)``.
+    """Provides Kademlia logic and RPCs. Communicates via SocketHandler
+    inbox and outbox queues. Automatically handles incoming requests and
+    populates k-Buckets when started.
     """
 
     def __init__(self, socket: SocketHandler, node_id: bytes, pubkey: bytes, encryption: UserEncryption, port: int = KADEMLIA_PORT) -> None:
@@ -358,12 +352,11 @@ class KademliaNode(Closable):
         await self.socket.outbox_queue.put((dest_ip, KADEMLIA_PORT, msg.to_bytes()))
 
     async def request(self, *, msg: KademliaMsg, dest_ip: str | None = None, peer_id: bytes | None = None, timeout: float = 5.0) -> KademliaMsg:
-        """Send ``msg`` and wait for the reply whose in_reply_to == msg.msg_id.
-
-        Built on top of the fire-and-forget ``_send``: it registers a future
-        before sending, then lets ``recv_loop`` -> ``handle_msg`` resolve it when
-        the matching reply arrives. Raises ``asyncio.TimeoutError`` if no reply
-        comes within ``timeout`` seconds.
+        """
+        Send `msg` and wait for the reply (in_reply_tp == msg.msg_id).
+        Raises `asyncio.TimeoutError` if no reply comes within `timeout` seconds.
+        Provide `peer_id` when possible so timeouts can be registered in `Buckets`
+        (so offline/ unresponsive peers can be removed from Buckets)
         """
         if dest_ip is None and peer_id is None:
             raise ValueError(f"Provide dest_ip or peer_id or both when calling {self.request.__name__}")
