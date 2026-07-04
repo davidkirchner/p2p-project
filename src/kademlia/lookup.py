@@ -98,7 +98,7 @@ class NodeLookup(IterativeLookup[list[Peer]]):
         self._node = node
 
     async def _query_peer(self, peer: Peer):
-        return await self._node._find_node_req(peer.ip, self.target)
+        return await self._node._find_node_req(peer.ip, self.target, peer_id=peer.id)
 
     def _handle_reply(self, result) -> ReplyOutcome:
         improved = self._add_peers(result or [])
@@ -108,14 +108,15 @@ class NodeLookup(IterativeLookup[list[Peer]]):
         return self._sorted()
 
 
-class ValueLookup(IterativeLookup[bytes | list[Peer]]):
+class ValueLookup(IterativeLookup[bytes]):
     def __init__(self, node: KademliaNode, key: bytes) -> None:
         super().__init__(node.buckets, node.node_id, key)
+        self._key = key
         self._node = node
         self._value: bytes | None = None
 
     async def _query_peer(self, peer: Peer):
-        return await self._node._find_value_req(peer.ip, self.target)
+        return await self._node._find_value_req(dest_ip=peer.ip, peer_id=peer.id, key=self.target)
 
     def _handle_reply(self, result: FindValueReplyPayload | None) -> ReplyOutcome:
         if result is None:
@@ -126,5 +127,7 @@ class ValueLookup(IterativeLookup[bytes | list[Peer]]):
         improved = self._add_peers(result.nodes)
         return ReplyOutcome.PROGRESS if improved else ReplyOutcome.NO_PROGRESS
 
-    def _result(self) -> bytes | list[Peer]:
-        return self._value if self._value is not None else self._sorted()
+    def _result(self) -> bytes:
+        if self._value is None:
+            raise ValueError(f"Unable to find value for key {self._key} in the network")
+        return self._value
