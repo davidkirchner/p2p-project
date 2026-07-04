@@ -1,5 +1,6 @@
 import asyncio
 import itertools
+from mimetypes import init
 from typing import cast
 import dotenv
 from encryption import UserEncryption
@@ -27,9 +28,25 @@ async def main():
     
     socket = SocketHandler()
     
-    kademlia = None
+    kademlia: KademliaNode | None = None
     
     database = await SqliteDatabase.create(config.sqlite_path)
+    
+    async def create_kademlia(ue: UserEncryption):
+        nonlocal kademlia
+        if kademlia is not None:
+            await kademlia.close()
+            
+        kademlia = KademliaNode(
+            socket=socket, 
+            node_id=kademlia_key(ue.user.public_identity), 
+            pubkey=ue.user.public_identity, 
+            encryption=ue, 
+            handler=KademliaHandler(
+                chat_msg_received
+            )
+        )
+        await kademlia.run()
     
     async def send_message(user: UserID, chat: ChatID, content: bytes, content_type: str):
         if not kademlia: return
@@ -40,7 +57,7 @@ async def main():
         assert len(others) == 1
         target_peer_id = (await database.User.by_id(others[0])).id
         
-        if not await kademlia.chat_msg_req(peer_id=target_peer_id, message=content, content_type=content_type):
+        if not await kademlia.chat_msg_req(peer_id=target_peer_id, chat_id=chat, message=content, content_type=content_type):
             raise RuntimeError(f"Message could not be sent in time")
         
     
@@ -64,20 +81,8 @@ async def main():
         
     
     async def create_user(name: str) -> User:
-        nonlocal kademlia
-        
         ue = await UserEncryption.create_new_user(storage=database, name=name)
-        
-        kademlia = KademliaNode(
-            socket=socket, 
-            node_id=kademlia_key(ue.user.public_identity), 
-            pubkey=ue.user.public_identity, 
-            encryption=ue, 
-            handler=KademliaHandler(
-                chat_msg_received
-            )
-        )
-        
+        await create_kademlia(ue)
         return ue.user
     
     
@@ -88,16 +93,7 @@ async def main():
                 return # nothing to do here
             
             ue = cast(UserEncryption, await UserEncryption.from_existing(await database.User.by_id(user)))
-            
-            kademlia = KademliaNode(
-                socket=socket, 
-                node_id=kademlia_key(ue.user.public_identity), 
-                pubkey=ue.user.public_identity, 
-                encryption=ue, 
-                handler=KademliaHandler(
-                    chat_msg_received
-                )
-            )
+            await create_kademlia(ue)
         else:
             if kademlia is not None:
                 await kademlia.close()
