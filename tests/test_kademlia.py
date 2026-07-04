@@ -709,6 +709,9 @@ class TestKademliaNode:
     async def test_run_starts_recv_loop_and_serves(self, node: KademliaNode):
         # run() must actually start the recv_loop: a request put on the inbox
         # gets answered without us driving recv_loop() ourselves.
+        # join_network() is mocked out: its bootstrap lookups would fill the
+        # outbox with FIND_NODE requests and block run() until they time out.
+        node.join_network = AsyncMock()
         await node.run()
         try:
             req = make_msg(MsgType.PING, PingPayload())
@@ -722,6 +725,8 @@ class TestKademliaNode:
 
     async def test_close_cancels_recv_loop(self, node: KademliaNode):
         # close() must tear the background recv_loop down.
+        # join_network() is mocked out so run() returns without bootstrap timeouts.
+        node.join_network = AsyncMock()
         await node.run()
         recv_task = node.get_named_closable(KademliaNode.recv_loop.__name__)
         assert isinstance(recv_task, asyncio.Task) and not recv_task.done()
