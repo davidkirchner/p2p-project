@@ -4,7 +4,7 @@ import secrets
 import models as m
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Self
 from contextlib import asynccontextmanager
@@ -203,7 +203,9 @@ class SqliteDatabase(m.Storage):
                 )
                 connection.commit()
 
-            async def messages(self, n: int, before: datetime) -> list[m.MessageID]:
+            async def messages(self, n: int, before: datetime | None = None) -> list[m.MessageID]:
+                if before is None:
+                    before = datetime.now(tz=timezone.utc)
                 rows = connection.execute(
                     "SELECT id FROM message WHERE chat = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT ?",
                     (str(self.id), before.isoformat(), n)

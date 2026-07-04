@@ -1,7 +1,7 @@
 import abc
 import uuid
 from contextlib import AsyncContextDecorator
-from typing import NewType, Self
+from typing import NewType, Optional, Self
 from datetime import datetime
 from kademlia.types import KademliaKey
 
@@ -65,7 +65,8 @@ class Chat(Thing):
         ...
         
     @abc.abstractmethod
-    async def messages(self, n: int, before: datetime) -> list[MessageID]:
+    async def messages(self, n: int, before: datetime | None = None) -> list[MessageID]:
+        """Last messages in ascending timestamp order up to specific timestamp (default now)"""
         pass
     
 

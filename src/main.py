@@ -1,6 +1,7 @@
 import asyncio
 from datetime import datetime, timezone
 import itertools
+import json
 from mimetypes import init
 import secrets
 from typing import cast
@@ -77,7 +78,20 @@ async def main():
             raise NotImplementedError  # TODO: we first need to receive the chat secret before establishing a chat
             target_chat = await database.Chat.create(secret=chat_secret, title=sender_name, description=f"Chat between you and {sender_name}", participants=[current_user, sender.id])
 
-        msg_id = MessageID(secrets.token_bytes(32))  # TODO: instead of random, make it based on the hash of the contents etc.
+        last_messages = await target_chat.messages(1)
+        if not last_messages:
+            prev_id = target_chat.secret
+        else:
+            prev_id = last_messages[0]
+        
+        msg_id = MessageID(kademlia_key(prev_id + json.dumps(
+            payload.model_dump(), 
+            ensure_ascii=False, 
+            allow_nan=False, 
+            separators=(",", ":"), 
+            sort_keys=True
+        ).encode("utf-8")))
+        
         ts = datetime.now(tz=timezone.utc)  # TODO: we need the timestamp from the other user! When it was sent, not received
         message = await database.Message.create(id=msg_id, chat=target_chat.id, sender=sender.id, timestamp=ts, content=payload.message, content_type=payload.content_type)
         await ui.received_message(message)
