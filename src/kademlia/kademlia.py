@@ -97,7 +97,8 @@ class FindValueReplyPayload(Payload):
     nodes: list[Peer] = Field(default_factory=list)
 
 class ChatMsgPayload(Payload):
-    message: bytes
+    chat_id: B64Bytes = Field(min_length=32, max_length=32)
+    message: B64Bytes
     content_type: Literal["text/plain"]
 
 
@@ -352,7 +353,7 @@ class KademliaNode(Closable):
         if resolved is None:
             raise RuntimeError(f"Failed to resolve peer ID: {target}")
         return resolved
-    
+
     async def join_network(self) -> None:
         #Register bootstrap peers
         for peer in BOOTSTRAP_PEERS:
@@ -538,7 +539,7 @@ class KademliaNode(Closable):
         )
         await self._send(dest_ip, msg)
 
-    async def chat_msg_req(self, peer_id: bytes, message: bytes,
+    async def chat_msg_req(self, peer_id: bytes, chat_id: bytes, message: bytes,
                            content_type: Literal["text/plain"],
                            timeout: float = 5.0) -> bool:
         """
@@ -550,6 +551,7 @@ class KademliaNode(Closable):
         msg = self._new_msg(
             msg_type=MsgType.CHAT_MSG,
             payload=ChatMsgPayload(
+                chat_id=chat_id,
                 message=message,
                 content_type=content_type
             ),
