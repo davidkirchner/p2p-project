@@ -35,7 +35,12 @@ class User(Thing):
     name: str | None
     public_identity: bytes
     private_identity: bytes | None
-
+    
+    @classmethod
+    @abc.abstractmethod
+    async def create(cls, id: KademliaKey, name: str, public_identity: bytes = b"", private_identity: bytes = b"") -> Self:
+        ...
+    
     @classmethod
     @abc.abstractmethod
     async def local_profiles(cls) -> list[UserID]:
@@ -53,9 +58,15 @@ class Chat(Thing):
 
     participants: list[UserID]
 
+    @classmethod
+    @abc.abstractmethod
+    async def create(cls, title: str, description: str = "", participants: list[UserID] | None = None) -> "Chat":
+        ...
+        
     @abc.abstractmethod
     async def messages(self, n: int, before: datetime) -> list[MessageID]:
         pass
+    
 
 class Message(Thing):
     id: MessageID
@@ -65,6 +76,11 @@ class Message(Thing):
 
     content: bytes
     content_type: str
+    
+    @classmethod
+    @abc.abstractmethod
+    async def create(cls, chat: ChatID, sender: UserID, content: bytes, content_type: str = "text/plain") -> "Message":
+        pass
 
 
 class Storage(abc.ABC):

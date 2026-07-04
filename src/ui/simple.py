@@ -1,13 +1,16 @@
 from abc import abstractmethod
+from base64 import b64decode
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from datetime import timezone
 from inspect import isawaitable
 from multiprocessing import Value
 import re
+import select
 import sys
 
 from textwrap import indent
-from typing import Awaitable, Callable, Optional, Self
+from typing import Any, Awaitable, Callable, Optional, Self
 import asyncio
 
 from closable import Closable
@@ -23,10 +26,16 @@ from models import ChatID, UserID
     
     
 class Handler(HandlerBase):
-    async def send_message(self, user: UserID | None, chat: ChatID | None, content: bytes, content_type: str):
+    async def send_message(self, user: UserID, chat: ChatID, content: bytes, content_type: str):
         pass
     
-    async def create_user(self, name: str):
+    async def create_user(self, name: str) -> User:
+        raise NotImplementedError
+    
+    async def conntect_to(self, user: UserID, peer_id: KademliaKey) -> Chat:
+        raise NotImplementedError
+    
+    async def selection_update(self, user: UserID | None, chat: ChatID | None):
         pass
     
     async def execute_command(self, user: UserID | None, chat: ChatID | None, args: list[str]):
@@ -43,6 +52,23 @@ class InputParser[T]:
     @abstractmethod
     def parse(self, s) -> T:
         return s.strip()
+    
+    def then(self, other: "InputParser"):
+        return CombinedParser([self, other])
+
+@dataclass
+class CombinedParser(InputParser):
+    inner: list[InputParser]
+    
+    @property
+    def prompt(self) -> str:
+        return ", ".join(filter(None, (i.prompt for i in self.inner)))
+    
+    def parse(self, s) -> Any:
+        current = s
+        for i in self.inner:
+            current = i.parse(current)
+        return current
 
 
 @dataclass
@@ -77,7 +103,7 @@ class ChoiceParser[T](InputParser):
     
     @property
     def prompt(self):
-        p = "Choose between:\n"
+        p = ""
         if isinstance(self.options, dict):
             largest_key_len = max(map(len, self.options))
             for key, value in self.options.items():
@@ -108,7 +134,19 @@ class RegexParser(InputParser):
         if not re.fullmatch(self.r, s):
             raise SyntaxError(f"Did not match regex {self.r}")
         return s
+
+class MapParser(InputParser):
+    def __init__(self, parser: Callable[[Any], Any], prompt: str = "") -> None:
+        super().__init__()
+        self._parse = parser
+        self._prompt = prompt
+        
+    @property
+    def prompt(self):
+        return self._prompt
     
+    def parse(self, s) -> Any:
+        return self._parse(s)
     
 class Escape(Exception):
     pass
@@ -141,22 +179,24 @@ class SimpleTerminalUI(Closable):
         
         self._input_fut = None
         self.exit_event = asyncio.Event()
-        self._state_change_condition = asyncio.Condition()
+        self._state_change = asyncio.Condition()
         
     @classmethod
-    async def create_and_run_to_completion(cls, database: Storage, handler: Handler, user: UserID | None = None, chat: ChatID | None = None) -> Self:
+    async def create(cls, database: Storage, handler: Handler, user: UserID | None = None, chat: ChatID | None = None) -> Self:
         ui = cls(
             database=database,
             handler=handler,
             user=user,
             chat=chat
         )
-        
         ui._ensure_terminal()
-        ui.bind_closable(ui._root_view())
-        await ui.exit_event.wait()
-        await ui.close()
         return ui
+    
+    async def run_to_completion(self):
+        await self._broadcast_state_change()
+        self.bind_closable(self._root_view())
+        await self.exit_event.wait()
+        await self.close()
     
     async def _print(self, message: str, end: str | None = "\n"): 
         if self._print_indent:
@@ -171,6 +211,10 @@ class SimpleTerminalUI(Closable):
         
     async def _print_error(self, msg):
         await self._print(f"ERROR: {msg}")
+        
+    async def wait_for(self, condition: Callable):
+        async with self._state_change:
+            await self._state_change.wait_for(condition)
     
     async def _root_view(self):
         while True:
@@ -183,22 +227,28 @@ class SimpleTerminalUI(Closable):
                         await self._print("No local users exist. You should create one i guess...")
                         if not await self._input(ConfirmParser(), "Create user?"): return
                         name = await self._input(RegexParser(r"\w+"), "His name: ")
-                        await self.handler.create_user(name)
-                        async with self._state_change_condition:
-                            await self._state_change_condition.wait_for(lambda: self.user is not None)
-                    elif len(selectable_users) == 1:
+                        user = await self.handler.create_user(name)
+                        await self.set_user(user.id)
+                    else:
+                        if len(selectable_users) == 1:
+                            selected_user = selectable_users[0]
+                        else:
+                            selected_user = await self._input(ChoiceParser(selectable_users), f"You have to select among different users:")
                         user_data = await self.database.User.by_id(selectable_users[0])
                         await self._print(f"You are now logged in as {user_data.name}")
-                    else:
-                        raise NotImplementedError
-                        await self._print(f"You have to select among different users:")
-                        await self._print_enumerable([(await self.database.User.by_id(uid)).name for uid in selectable_users])
+                        await self.set_user(selected_user)
                         
                 elif self.chat is None:
-                    await self._print("Your chats:")
                     chat_ids = await (await self.database.User.by_id(self.user)).chats()
-                    chat_id = await self._input(ChoiceParser(chat_ids), "Select one: ")
-                    self.chat = chat_id
+                    if len(chat_ids) == 0:
+                        await self._print("No active chats found.")
+                        peer_id_bytes: bytes = await self._input(RegexParser(r"\S+").then(MapParser(b64decode)), "Enter a peer id to start a chat: ")
+                        peer_id = KademliaKey(peer_id_bytes)
+                        chat = await self.handler.conntect_to(self.user, peer_id)
+                        chat_id = chat.id
+                    else:
+                        chat_id = await self._input(ChoiceParser(chat_ids), "Select one of your chats: ")
+                    await self.set_chat(chat_id)
                 else:
                     await self._messages_view()
                 
@@ -215,12 +265,32 @@ class SimpleTerminalUI(Closable):
                 await self._print(self._prompt, end=None)
                 msg = await self._input(InputParser())
                 await self.send_message(msg)
-    
                 
+                
+    async def set_user(self, user: UserID):
+        self.user = user
+        await self._broadcast_state_change()
+            
+    async def set_chat(self, chat: ChatID):
+        self.chat = chat
+        await self._broadcast_state_change()
+        
+    async def received_message(self, msg: Message):
+        if msg.chat == self.chat:
+            await self._print_message(msg)
+        else:
+            chat_title = (await self.database.Chat.by_id(msg.chat)).title
+            await self._print(f"(new message in {chat_title})")
+            
+    async def _broadcast_state_change(self):
+        await self.handler.selection_update(self.user, self.chat)
+        async with self._state_change:
+            self._state_change.notify_all()
                 
     async def send_message(self, message: str):
-        if self.chat is None:
+        if self.chat is None or self.user is None:
             await self._print_error("Cannot send messages since no chat is selected.")
+            return
         self.bind_closable(self.handler.send_message(self.user, self.chat, content=message.encode("utf-8"), content_type="text/plain"))
     
     async def exit_ui(self):

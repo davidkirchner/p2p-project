@@ -117,6 +117,11 @@ class SqliteDatabase(m.Storage):
                     (str(self.id),)
                 ).fetchall()
                 return [m.ChatID(uuid.UUID(r[0])) for r in rows]
+            
+            @classmethod
+            async def local_profiles(cls) -> list[m.UserID]:
+                rows = connection.execute("select id from user where private_identity notnull").fetchall()
+                return [m.UserID(r[0]) for r in rows]
 
             def __repr__(self) -> str:
                 return f"User(id={self.id!r}, name={self.name!r})"

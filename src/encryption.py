@@ -46,17 +46,17 @@ class UserEncryption(PeerEncryption):
         public_key = private_key.public_key()
 
         private_bytes: bytes = private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PrivateFormat.Raw,
             encryption_algorithm=serialization.NoEncryption(),  # or use BestAvailableEncryption(b"password")
         )
 
         # Serialize public key (share with peers)
         public_bytes: bytes = public_key.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
         )
-        from .kademlia.kademlia import kademlia_key
+        from kademlia.kademlia import kademlia_key
         id = kademlia_key(public_bytes)
 
         user = await storage.User.create(id=id, name=name, public_identity=public_bytes, private_identity=private_bytes)

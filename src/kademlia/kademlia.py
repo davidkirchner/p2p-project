@@ -19,19 +19,6 @@ KADEMLIA_PORT = 9009
 ID_SPACE = 256 # bit
 ALPHA = 3
 
-BOOTSTRAP_PEERS = [
-    Peer(
-        id=bytes.fromhex("1111111111111111111111111111111111111111111111111111111111111111"),
-        ip="127.0.0.1",
-    ),
-    Peer(
-        id=bytes.fromhex("2222222222222222222222222222222222222222222222222222222222222222"),
-        ip="127.0.0.2",
-    ),
-]
-
-BOOTSTRAP_LOOKUPS = 5
-
 
 def kademlia_key(data: bytes) -> KademliaKey:
     return KademliaKey(hashlib.sha256(data).digest())
@@ -54,6 +41,19 @@ class Peer(BaseModel):
     id: B64Bytes
     ip: str
 
+
+BOOTSTRAP_PEERS = [
+    Peer(
+        id=bytes.fromhex("1111111111111111111111111111111111111111111111111111111111111111"),
+        ip="127.0.0.1",
+    ),
+    Peer(
+        id=bytes.fromhex("2222222222222222222222222222222222222222222222222222222222222222"),
+        ip="127.0.0.2",
+    ),
+]
+
+BOOTSTRAP_LOOKUPS = 5
 
 
 class Payload(BaseModel):
