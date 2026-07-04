@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 import secrets
 import models as m
@@ -136,11 +137,11 @@ class SqliteDatabase(m.Storage):
             participants: list[m.UserID]
 
             @classmethod
-            async def create(cls, id: m.ChatID, title: str, description: str = "", participants: list[m.UserID] | None = None) -> "Chat":
-                chat_id = id
+            async def create(cls, secret: bytes, title: str, description: str = "", participants: list[m.UserID] | None = None) -> "Chat":
+                chat_id = m.ChatID(os.urandom(32))
                 connection.execute(
-                    "INSERT INTO chat (id, title, description) VALUES (?, ?, ?)",
-                    (str(chat_id), title, description),
+                    "INSERT INTO chat (id, secret, title, description) VALUES (?, ?, ?, ?)",
+                    (str(chat_id), secret, title, description),
                 )
                 for uid in (participants or []):
                     connection.execute(
@@ -223,9 +224,8 @@ class SqliteDatabase(m.Storage):
             content_type: str
 
             @classmethod
-            async def create(cls, id: m.MessageID, chat: m.ChatID, sender: m.UserID, content: bytes, content_type: str = "text/plain") -> "Message":
+            async def create(cls, id: m.MessageID, chat: m.ChatID, sender: m.UserID, timestamp: datetime, content: bytes, content_type: str = "text/plain") -> "Message":
                 message_id = id
-                timestamp = datetime.now(tz=None)
                 connection.execute(
                     "INSERT INTO message (id, chat, sender, timestamp, content, content_type) VALUES (?, ?, ?, ?, ?, ?)",
                     (str(message_id), str(chat), str(sender), timestamp.isoformat(), content, content_type),

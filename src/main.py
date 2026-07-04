@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 import itertools
 from mimetypes import init
 import secrets
@@ -73,10 +74,12 @@ async def main():
         except KeyError:
             await ui.wait_for(lambda: ui.user)
             current_user = cast(UserID, ui.user)
-            target_chat = await database.Chat.create(id=chat_id, title=sender_name, description=f"Chat between you and {sender_name}", participants=[current_user, sender.id])
+            raise NotImplementedError  # TODO: we first need to receive the chat secret before establishing a chat
+            target_chat = await database.Chat.create(secret=chat_secret, title=sender_name, description=f"Chat between you and {sender_name}", participants=[current_user, sender.id])
 
-        msg_id = MessageID(secrets.token_bytes(32))
-        message = await database.Message.create(id=msg_id, chat=target_chat.id, sender=sender.id, content=payload.message, content_type=payload.content_type)
+        msg_id = MessageID(secrets.token_bytes(32))  # TODO: instead of random, make it based on the hash of the contents etc.
+        ts = datetime.now(tz=timezone.utc)  # TODO: we need the timestamp from the other user! When it was sent, not received
+        message = await database.Message.create(id=msg_id, chat=target_chat.id, sender=sender.id, timestamp=ts, content=payload.message, content_type=payload.content_type)
         await ui.received_message(message)
         
     
@@ -111,8 +114,8 @@ async def main():
         
         # i guess we can create a chat now and call it a day?
         peer_name = str(peer.ip) # TODO: fetch metadata about other peer
-        chat_id = ChatID(secrets.token_bytes(32)) # we create a random (important!) chat id
-        target_chat = await database.Chat.create(id=chat_id, title=peer_name, description=f"Chat between you and {peer_name}", participants=[self, UserID(peer_id)])
+        chat_secret = ChatID(secrets.token_bytes(32)) # we create a random (important!) chat secret
+        target_chat = await database.Chat.create(secret=chat_secret, title=peer_name, description=f"Chat between you and {peer_name}", participants=[self, UserID(peer_id)])
         return target_chat
 
     # this context manager automatically does necessary resource management

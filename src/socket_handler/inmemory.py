@@ -100,6 +100,13 @@ class InMemorySocketHandler(Closable, AnySocketHandler):
 
         self.bind_named_closable(self._send_loop.__name__, self._send_loop())
         
+    async def stop(self):
+        assert self.network
+        assert self._host
+        assert self._port
+        self.network._unregister(self._host, self._port)
+        self.bind_named_closable(self._send_loop.__name__, None)
+        
     async def close(self):
         await super().close()
         if self._host is not None and self._port is not None:
