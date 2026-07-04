@@ -1,4 +1,5 @@
 from pathlib import Path
+import secrets
 import models as m
 import sqlite3
 import uuid
@@ -36,12 +37,12 @@ class SqliteDatabase(m.Storage):
             private_identity BLOB
         );
         CREATE TABLE IF NOT EXISTS chat (
-            id TEXT NOT NULL PRIMARY KEY,
+            id BLOB NOT NULL PRIMARY KEY,
             title TEXT,
             description TEXT
         );
         CREATE TABLE IF NOT EXISTS chat_participant (
-            chat_id TEXT NOT NULL,
+            chat_id BLOB NOT NULL,
             user_id TEXT NOT NULL,
             PRIMARY KEY (chat_id, user_id),
             FOREIGN KEY (chat_id) REFERENCES chat(id) ON DELETE CASCADE,
@@ -49,7 +50,7 @@ class SqliteDatabase(m.Storage):
         );
         CREATE TABLE IF NOT EXISTS message (
             id TEXT NOT NULL PRIMARY KEY,
-            chat TEXT NOT NULL,
+            chat BLOB NOT NULL,
             sender TEXT NOT NULL,
             timestamp TEXT NOT NULL,
             content BLOB NOT NULL,
@@ -116,7 +117,7 @@ class SqliteDatabase(m.Storage):
                     "SELECT chat_id FROM chat_participant WHERE user_id = ?",
                     (str(self.id),)
                 ).fetchall()
-                return [m.ChatID(uuid.UUID(r[0])) for r in rows]
+                return [m.ChatID(r[0]) for r in rows]
             
             @classmethod
             async def local_profiles(cls) -> list[m.UserID]:
@@ -136,7 +137,7 @@ class SqliteDatabase(m.Storage):
 
             @classmethod
             async def create(cls, title: str, description: str = "", participants: list[m.UserID] | None = None) -> "Chat":
-                chat_id = m.ChatID(uuid.uuid4())
+                chat_id = m.ChatID(secrets.token_bytes(32))
                 connection.execute(
                     "INSERT INTO chat (id, title, description) VALUES (?, ?, ?)",
                     (str(chat_id), title, description),
@@ -163,7 +164,7 @@ class SqliteDatabase(m.Storage):
                 ).fetchall()
                 participants = [m.UserID(r[0]) for r in participant_rows]
                 return cls(
-                    id=m.ChatID(uuid.UUID(row[0])),
+                    id=m.ChatID(row[0]),
                     title=row[1] or "",
                     description=row[2] or "",
                     participants=participants,
@@ -206,7 +207,7 @@ class SqliteDatabase(m.Storage):
                     "SELECT id FROM message WHERE chat = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT ?",
                     (str(self.id), before.isoformat(), n)
                 ).fetchall()
-                return [m.MessageID(uuid.UUID(r[0])) for r in rows]
+                return [m.MessageID(r[0]) for r in rows]
 
             def __repr__(self) -> str:
                 return f"Chat(id={self.id!r}, title={self.title!r})"
@@ -223,7 +224,7 @@ class SqliteDatabase(m.Storage):
 
             @classmethod
             async def create(cls, chat: m.ChatID, sender: m.UserID, content: bytes, content_type: str = "text/plain") -> "Message":
-                message_id = m.MessageID(uuid.uuid4())
+                message_id = m.MessageID(secrets.token_bytes(32))
                 timestamp = datetime.now(tz=None)
                 connection.execute(
                     "INSERT INTO message (id, chat, sender, timestamp, content, content_type) VALUES (?, ?, ?, ?, ?, ?)",
@@ -241,8 +242,8 @@ class SqliteDatabase(m.Storage):
                 if row is None:
                     raise KeyError(f"Message with id {id} not found")
                 return cls(
-                    id=m.MessageID(uuid.UUID(row[0])),
-                    chat=m.ChatID(uuid.UUID(row[1])),
+                    id=m.MessageID(row[0]),
+                    chat=m.ChatID(row[1]),
                     sender=m.UserID(row[2]),
                     timestamp=datetime.fromisoformat(row[3]),
                     content=row[4],

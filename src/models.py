@@ -6,8 +6,8 @@ from datetime import datetime
 from kademlia.types import KademliaKey
 
 UserID = NewType("UserID", KademliaKey)
-ChatID = NewType("ChatID", uuid.UUID)
-MessageID = NewType("MessageID", uuid.UUID)
+ChatID = NewType("ChatID", bytes)
+MessageID = NewType("MessageID", bytes)
 
 
 class Thing(abc.ABC):
