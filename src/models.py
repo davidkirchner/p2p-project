@@ -60,7 +60,7 @@ class Chat(Thing):
 
     @classmethod
     @abc.abstractmethod
-    async def create(cls, title: str, description: str = "", participants: list[UserID] | None = None) -> "Chat":
+    async def create(cls, id: ChatID, title: str, description: str = "", participants: list[UserID] | None = None) -> "Chat":
         ...
         
     @abc.abstractmethod
@@ -79,7 +79,7 @@ class Message(Thing):
     
     @classmethod
     @abc.abstractmethod
-    async def create(cls, chat: ChatID, sender: UserID, content: bytes, content_type: str = "text/plain") -> "Message":
+    async def create(cls, id: MessageID, chat: ChatID, sender: UserID, content: bytes, content_type: str = "text/plain") -> "Message":
         pass
 
 

@@ -1,6 +1,7 @@
 import asyncio
 import itertools
 from mimetypes import init
+import secrets
 from typing import cast
 import dotenv
 from encryption import UserEncryption
@@ -10,7 +11,7 @@ from logging_setup import setup_logging
 
 from config import Config
 from db.sqlite_impl import SqliteDatabase
-from models import Chat, ChatID, User, UserID
+from models import Chat, ChatID, MessageID, User, UserID
 from socket_handler import SocketHandler
 from ui.simple import SimpleTerminalUI, Handler as UIHandler
 
@@ -65,18 +66,17 @@ async def main():
         sender = (await database.User.by_id(sender_key))
         sender_name = cast(str, sender.name or sender.id)
         
-        await ui.wait_for(lambda: ui.user)
-        current_user = cast(UserID, ui.user)
+        chat_id = ChatID(payload.chat_id)
         
-        for chat_id in (await sender.chats()):
-            members = (chat := await database.Chat.by_id(chat_id)).participants
-            if set(members) == {sender_key, current_user}:
-                target_chat = chat
-                break
-        else:
-            target_chat = await database.Chat.create(title=sender_name, description=f"Chat between you and {sender_name}", participants=[current_user, sender.id])
+        try:
+            target_chat = await database.Chat.by_id(chat_id)
+        except KeyError:
+            await ui.wait_for(lambda: ui.user)
+            current_user = cast(UserID, ui.user)
+            target_chat = await database.Chat.create(id=chat_id, title=sender_name, description=f"Chat between you and {sender_name}", participants=[current_user, sender.id])
 
-        message = await database.Message.create(chat=target_chat.id, sender=sender.id, content=payload.message, content_type=payload.content_type)
+        msg_id = MessageID(secrets.token_bytes(32))
+        message = await database.Message.create(id=msg_id, chat=target_chat.id, sender=sender.id, content=payload.message, content_type=payload.content_type)
         await ui.received_message(message)
         
     
@@ -111,7 +111,8 @@ async def main():
         
         # i guess we can create a chat now and call it a day?
         peer_name = str(peer.ip) # TODO: fetch metadata about other peer
-        target_chat = await database.Chat.create(title=peer_name, description=f"Chat between you and {peer_name}", participants=[self, UserID(peer_id)])
+        chat_id = ChatID(secrets.token_bytes(32)) # we create a random (important!) chat id
+        target_chat = await database.Chat.create(id=chat_id, title=peer_name, description=f"Chat between you and {peer_name}", participants=[self, UserID(peer_id)])
         return target_chat
 
     # this context manager automatically does necessary resource management

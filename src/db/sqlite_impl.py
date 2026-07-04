@@ -136,8 +136,8 @@ class SqliteDatabase(m.Storage):
             participants: list[m.UserID]
 
             @classmethod
-            async def create(cls, title: str, description: str = "", participants: list[m.UserID] | None = None) -> "Chat":
-                chat_id = m.ChatID(secrets.token_bytes(32))
+            async def create(cls, id: m.ChatID, title: str, description: str = "", participants: list[m.UserID] | None = None) -> "Chat":
+                chat_id = id
                 connection.execute(
                     "INSERT INTO chat (id, title, description) VALUES (?, ?, ?)",
                     (str(chat_id), title, description),
@@ -223,8 +223,8 @@ class SqliteDatabase(m.Storage):
             content_type: str
 
             @classmethod
-            async def create(cls, chat: m.ChatID, sender: m.UserID, content: bytes, content_type: str = "text/plain") -> "Message":
-                message_id = m.MessageID(secrets.token_bytes(32))
+            async def create(cls, id: m.MessageID, chat: m.ChatID, sender: m.UserID, content: bytes, content_type: str = "text/plain") -> "Message":
+                message_id = id
                 timestamp = datetime.now(tz=None)
                 connection.execute(
                     "INSERT INTO message (id, chat, sender, timestamp, content, content_type) VALUES (?, ?, ?, ?, ?, ?)",
