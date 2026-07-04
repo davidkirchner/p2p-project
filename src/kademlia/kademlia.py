@@ -8,7 +8,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.exceptions import InvalidSignature
 from closable import Closable
 from handlers import HandlerBase
-from socket_handler import SocketHandler
+from socket_handler import AnySocketHandler, SocketHandler
 from .types import B64Bytes, KademliaKey
 import secrets
 
@@ -328,7 +328,7 @@ class KademliaNode(Closable):
     populates k-Buckets when started.
     """
 
-    def __init__(self, socket: SocketHandler, node_id: bytes, pubkey: bytes, encryption: UserEncryption, handler: Handler, port: int = KADEMLIA_PORT) -> None:
+    def __init__(self, socket: AnySocketHandler, node_id: bytes, pubkey: bytes, encryption: UserEncryption, handler: Handler, port: int = KADEMLIA_PORT) -> None:
         super().__init__()
         self.socket = socket
         self.node_id = node_id

@@ -1,12 +1,24 @@
 import asyncio
 import logging
 import struct
-from asyncio import StreamReader, StreamWriter
+from asyncio import Protocol, StreamReader, StreamWriter
 from closable import Closable
 
 logger = logging.getLogger(__name__)
 
-class SocketHandler(Closable):
+type InboxData = tuple[str, bytes]
+type OutboxData = tuple[str, int, bytes]
+
+
+class AnySocketHandler(Protocol):
+    inbox_queue: asyncio.Queue[InboxData]
+    outbox_queue: asyncio.Queue[OutboxData]
+    
+    async def start(self, host, port): ...
+    async def close(self): ...
+
+
+class SocketHandler(Closable, AnySocketHandler):
     def __init__(self) -> None:
         super().__init__()
         self.inbox_queue = asyncio.Queue()
