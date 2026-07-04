@@ -28,6 +28,8 @@ from kademlia.kademlia import (
     FindNodeReplyPayload,
     FindValuePayload,
     FindValueReplyPayload,
+    ChatMsgPayload,
+    ChatMsgReplyPayload,
     _Pending,
 )
 from kademlia.lookup import NodeLookup, ValueLookup, ReplyOutcome
@@ -122,6 +124,10 @@ def test_payload_type_must_match_msg_type():
                 nodes=[Peer(id=os.urandom(32), ip="10.0.0.2")]
             ),
         ),
+        (
+            MsgType.CHAT_MSG,
+            ChatMsgPayload(chat_id=os.urandom(32), message=b"hello!", content_type="text/plain")
+        )
     ],
 )
 def test_payload_roundtrip(msg_type: MsgType, payload: Payload):
@@ -637,6 +643,44 @@ class TestKademliaNode:
         _, _, reply = await get_reply(node)
         assert reply.in_reply_to == req.msg_id
 
+    async def test_chat_msg_request_is_acked(self, node: KademliaNode):
+        req = make_msg(
+            MsgType.CHAT_MSG,
+            ChatMsgPayload(
+                chat_id=os.urandom(32),
+                message=b"hello",
+                content_type="text/plain",
+            ),
+        )
+        await node.handle_msg("203.0.113.5", req)
+        _, _, reply = await get_reply(node)
+        assert reply.msg_type is MsgType.CHAT_MSG_REPLY
+        assert isinstance(reply.payload, ChatMsgReplyPayload)
+        assert reply.payload.success is True
+
+    async def test_chat_msg_reply_is_correlatable(self, node: KademliaNode):
+        req = make_msg(
+            MsgType.CHAT_MSG,
+            ChatMsgPayload(
+                chat_id=os.urandom(32),
+                message=b"hello",
+                content_type="text/plain",
+            ),
+        )
+        await node.handle_msg("203.0.113.5", req)
+        _, _, reply = await get_reply(node)
+        assert reply.in_reply_to == req.msg_id
+
+    def test_chat_msg_rejects_wrong_size_chat_id(self):
+        # chat_id is the shared chat secret and must be exactly 32 bytes.
+        for bad_len in (0, 16, 31, 33):
+            with pytest.raises(ValueError):
+                ChatMsgPayload(
+                    chat_id=os.urandom(bad_len),
+                    message=b"hello",
+                    content_type="text/plain",
+                )
+
     # ---- recv_loop -----------------------------------------------------------
 
     async def test_recv_loop_dispatches_valid_message(self, node: KademliaNode):
@@ -665,6 +709,9 @@ class TestKademliaNode:
     async def test_run_starts_recv_loop_and_serves(self, node: KademliaNode):
         # run() must actually start the recv_loop: a request put on the inbox
         # gets answered without us driving recv_loop() ourselves.
+        # join_network() is mocked out: its bootstrap lookups would fill the
+        # outbox with FIND_NODE requests and block run() until they time out.
+        node.join_network = AsyncMock()
         await node.run()
         try:
             req = make_msg(MsgType.PING, PingPayload())
@@ -678,6 +725,8 @@ class TestKademliaNode:
 
     async def test_close_cancels_recv_loop(self, node: KademliaNode):
         # close() must tear the background recv_loop down.
+        # join_network() is mocked out so run() returns without bootstrap timeouts.
+        node.join_network = AsyncMock()
         await node.run()
         recv_task = node.get_named_closable(KademliaNode.recv_loop.__name__)
         assert isinstance(recv_task, asyncio.Task) and not recv_task.done()
