@@ -7,6 +7,7 @@ from encryption import UserEncryption
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.exceptions import InvalidSignature
 from closable import Closable
+from handlers import HandlerBase
 from socket_handler import SocketHandler
 from .types import B64Bytes, KademliaKey
 
@@ -304,6 +305,12 @@ class _Pending:
     future: asyncio.Future[KademliaMsg]
     peer_ip: str
     reply_type: MsgType
+    
+    
+class Handler(HandlerBase):
+    async def chat_msg_received(self, sender: KademliaKey, payload: ChatMsgPayload):
+        pass
+    
 
 class KademliaNode(Closable):
     """Kademlia RPC engine sitting on top of the SocketHandler queues.
@@ -313,7 +320,7 @@ class KademliaNode(Closable):
     ``(dest_ip, dest_port, data)``.
     """
 
-    def __init__(self, socket: SocketHandler, node_id: bytes, pubkey: bytes, encryption: UserEncryption, port: int = KADEMLIA_PORT) -> None:
+    def __init__(self, socket: SocketHandler, node_id: bytes, pubkey: bytes, encryption: UserEncryption, handler: Handler, port: int = KADEMLIA_PORT) -> None:
         super().__init__()
         self.socket = socket
         self.node_id = node_id
@@ -323,6 +330,7 @@ class KademliaNode(Closable):
         self.buckets = Buckets(node_id, self._fire_ping)
         self.loop = asyncio.get_running_loop()
         self.dht: dict[bytes, Any] = {} # TODO: store this in a more appropriate way
+        self.handler = handler
         # Outstanding requests awaiting a reply, keyed by the request's msg_id.
         self._pending: dict[bytes, _Pending] = {}
 
@@ -591,7 +599,7 @@ class KademliaNode(Closable):
                 )
         elif msg.msg_type is MsgType.CHAT_MSG:
             assert isinstance(msg.payload, ChatMsgPayload)
-            # TODO: Forward the message to the application/UI layer.
+            
             logger.debug(
                 "Received chat message from %s: %s",
                 sender_ip,
@@ -602,6 +610,8 @@ class KademliaNode(Closable):
                 in_reply_to=msg.msg_id,
                 success=True
             )
+            
+            self.bind_closable(self.handler.chat_msg_received(KademliaKey(msg.sender_id), msg.payload))
 
 
     async def recv_loop(self):

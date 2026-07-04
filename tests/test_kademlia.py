@@ -398,7 +398,8 @@ def build_node(*, port: int = KADEMLIA_PORT) -> KademliaNode:
     """
     node_id, pubkey, signer = new_identity()
     encryption: Any = signer  # KademliaNode only needs .sign(); see _Signer
-    return KademliaNode(SocketHandler(), node_id, pubkey, encryption, port=port)
+    from kademlia.kademlia import Handler as KademliaHandler
+    return KademliaNode(SocketHandler(), node_id, pubkey, encryption, port=port, handler=KademliaHandler())
 
 
 async def get_outbox(node: KademliaNode, timeout: float = 1.0):
