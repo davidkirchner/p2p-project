@@ -9,6 +9,7 @@ from cryptography.exceptions import InvalidSignature
 from closable import Closable
 from socket_handler import SocketHandler
 from .types import B64Bytes, KademliaKey
+import secrets
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,19 @@ logger = logging.getLogger(__name__)
 KADEMLIA_PORT = 9009
 ID_SPACE = 256 # bit
 ALPHA = 3
+
+BOOTSTRAP_PEERS = [
+    Peer(
+        id=bytes.fromhex("1111111111111111111111111111111111111111111111111111111111111111"),
+        ip="127.0.0.1",
+    ),
+    Peer(
+        id=bytes.fromhex("2222222222222222222222222222222222222222222222222222222222222222"),
+        ip="127.0.0.2",
+    ),
+]
+
+BOOTSTRAP_LOOKUPS = 5
 
 
 def kademlia_key(data: bytes) -> KademliaKey:
@@ -330,6 +344,22 @@ class KademliaNode(Closable):
         if resolved is None:
             raise RuntimeError(f"Failed to resolve peer ID: {target}")
         return resolved
+    
+    async def join_network(self) -> None:
+        #Register bootstrap peers
+        for peer in BOOTSTRAP_PEERS:
+            if peer.id == self.node_id:
+                continue
+            self.buckets.register_successful_contact(peer.id,peer.ip)
+        #Lookup own id
+        await self.find_node(self.node_id)
+        #Repeat N times
+        for _ in range (BOOTSTRAP_LOOKUPS):
+            # Generate random id
+            random_node = secrets.token_bytes(32)
+            #Lookup random id
+            await self.find_node(random_node)
+
 
     # ---- message plumbing ----------------------------------------------------
 
@@ -636,3 +666,4 @@ class KademliaNode(Closable):
     async def run(self):
         logger.info("Kademlia node %s listening on port %d", self.node_id.hex()[:8], self.port)
         self.bind_named_closable(self.recv_loop.__name__, asyncio.create_task(self.recv_loop()))
+        await self.join_network()
