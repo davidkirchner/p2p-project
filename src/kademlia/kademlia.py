@@ -1,7 +1,7 @@
 import uuid, hashlib, logging, asyncio
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Literal, Self
+from typing import Any, Callable, Self
 from pydantic import BaseModel, Field, SerializeAsAny, model_validator
 from encryption import UserEncryption
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -9,7 +9,7 @@ from cryptography.exceptions import InvalidSignature
 from closable import Closable
 from handlers import HandlerBase
 from socket_handler import AnySocketHandler, SocketHandler
-from .types import B64Bytes, KademliaKey
+from .types import B64Bytes, ContentType, KademliaKey
 import secrets
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,11 @@ class MsgType(str, Enum):
 class Peer(BaseModel):
     id: B64Bytes
     ip: str
+
+
+class PeerInfo(Peer):
+    """Static metadata about a peer"""
+    pubkey: B64Bytes
 
 
 BOOTSTRAP_PEERS = [
@@ -97,10 +102,10 @@ class FindValueReplyPayload(Payload):
     nodes: list[Peer] = Field(default_factory=list)
 
 class ChatMsgPayload(Payload):
-    chat_id: B64Bytes = Field(min_length=32, max_length=32)
-    shared_secret: B64Bytes = Field(min_length=32, max_length=32)
+    chat_id: B64Bytes = Field(min_length=16, max_length=16) # uuid4
+    shared_secret: B64Bytes = Field(min_length=32, max_length=32) # 256 Bit
     message: B64Bytes
-    content_type: Literal["text/plain"]
+    content_type: ContentType
 
 
 class ChatMsgReplyPayload(Payload):
@@ -320,7 +325,7 @@ class _Pending:
 
 
 class Handler(HandlerBase):
-    async def chat_msg_received(self, sender: KademliaKey, payload: ChatMsgPayload):
+    async def chat_msg_received(self, sender: KademliaKey, sender_pubkey: bytes, payload: ChatMsgPayload):
         pass
 
 
@@ -427,6 +432,18 @@ class KademliaNode(Closable):
             return True
         except (asyncio.TimeoutError, RuntimeError):
             return False
+
+    async def get_peer_infos(self, peer_id: bytes, timeout: float = 5.0) -> PeerInfo:
+        """
+        Raises `asyncio.TimeoutError` if the peer does not answer in time.
+        Raises `RuntimeError` if the responder's identity differs from `peer_id`.
+        """
+        peer = await self.resolve_peer(peer_id)
+        msg = self._new_msg(MsgType.PING, PingPayload())
+        reply = await self.request(msg=msg, dest_ip=peer.ip, peer_id=peer_id, timeout=timeout)
+        if reply.sender_id != peer_id:
+            raise RuntimeError("Response's sender identity does not match the requested peer ID")
+        return PeerInfo(id=reply.sender_id, ip=peer.ip, pubkey=reply.sender_pubkey)
 
     async def _pong(self, dest_ip: str, in_reply_to: bytes) -> None:
         """Fire-and-forget reply to a PING."""
@@ -541,7 +558,7 @@ class KademliaNode(Closable):
         await self._send(dest_ip, msg)
 
     async def chat_msg_req(self, peer_id: bytes, chat_id: bytes, shared_secret: bytes, message: bytes,
-                           content_type: Literal["text/plain"], timeout: float = 5.0) -> bool:
+                           content_type: ContentType, timeout: float = 5.0) -> bool:
         """
         Sends an application level CHAT MESSAGE. Returns 'True' if the recipient acknowledges it before timeout,
         'False' otherwise
@@ -660,7 +677,7 @@ class KademliaNode(Closable):
                 success=True
             )
 
-            self.bind_closable(self.handler.chat_msg_received(KademliaKey(msg.sender_id), msg.payload))
+            self.bind_closable(self.handler.chat_msg_received(KademliaKey(msg.sender_id), msg.sender_pubkey, msg.payload))
         else:
             logger.debug(f"Received message with unknown msg_type: {msg}")
             return

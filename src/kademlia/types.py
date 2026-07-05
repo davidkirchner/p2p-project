@@ -1,5 +1,5 @@
 import base64
-from typing import Annotated, NewType
+from typing import Annotated, Literal, NewType
 from pydantic import BeforeValidator, PlainSerializer
 
 def _b64_decode(v: str | bytes) -> bytes:
@@ -22,3 +22,5 @@ type B64Bytes = Annotated[
 ]
 
 KademliaKey = NewType("KademliaKey", B64Bytes)
+
+type ContentType = Literal["text/plain"]

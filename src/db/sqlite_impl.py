@@ -23,7 +23,7 @@ class SqliteDatabase(m.Storage):
     async def create(cls, path: Path) -> Self:
 
         connection = sqlite3.connect(str(path))
-        
+
         # Enable recommended pragmas
         connection.execute("PRAGMA journal_mode = WAL;")
         connection.execute("PRAGMA foreign_keys = ON;")
@@ -39,6 +39,7 @@ class SqliteDatabase(m.Storage):
         );
         CREATE TABLE IF NOT EXISTS chat (
             id BLOB NOT NULL PRIMARY KEY,
+            secret BLOB NOT NULL,
             title TEXT,
             description TEXT
         );
@@ -76,6 +77,18 @@ class SqliteDatabase(m.Storage):
                 connection.execute(
                     "INSERT INTO user (id, name, public_identity, private_identity) VALUES (?, ?, ?, ?)",
                     (str(user_id), name, public_identity, private_identity),
+                )
+                connection.commit()
+                return await cls.by_id(user_id)
+
+            @classmethod
+            async def register_peer(cls, id: m.UserID, public_identity: bytes, name: str = "") -> "User":
+                user_id = m.UserID(id)
+                # private_identity NULL marks this as a remote peer (see local_profiles).
+                connection.execute(
+                    "INSERT INTO user (id, name, public_identity, private_identity) "
+                    "VALUES (?, ?, ?, NULL) ON CONFLICT(id) DO NOTHING",
+                    (str(user_id), name, public_identity),
                 )
                 connection.commit()
                 return await cls.by_id(user_id)
@@ -119,7 +132,7 @@ class SqliteDatabase(m.Storage):
                     (str(self.id),)
                 ).fetchall()
                 return [m.ChatID(r[0]) for r in rows]
-            
+
             @classmethod
             async def local_profiles(cls) -> list[m.UserID]:
                 rows = connection.execute("select id from user where private_identity notnull").fetchall()
@@ -132,13 +145,13 @@ class SqliteDatabase(m.Storage):
         @dataclass
         class Chat(m.Chat):
             id: m.ChatID
+            secret: bytes
             title: str
             description: str
             participants: list[m.UserID]
 
             @classmethod
-            async def create(cls, secret: bytes, title: str, description: str = "", participants: list[m.UserID] | None = None) -> "Chat":
-                chat_id = m.ChatID(os.urandom(32))
+            async def create(cls, chat_id: m.ChatID, secret: bytes, title: str, description: str = "", participants: list[m.UserID] | None = None) -> "Chat":
                 connection.execute(
                     "INSERT INTO chat (id, secret, title, description) VALUES (?, ?, ?, ?)",
                     (str(chat_id), secret, title, description),
@@ -154,7 +167,7 @@ class SqliteDatabase(m.Storage):
             @classmethod
             async def by_id(cls, id: m.ChatID) -> "Chat":
                 row = connection.execute(
-                    "SELECT id, title, description FROM chat WHERE id = ?",
+                    "SELECT id, secret, title, description FROM chat WHERE id = ?",
                     (str(id),)
                 ).fetchone()
                 if row is None:
@@ -166,15 +179,16 @@ class SqliteDatabase(m.Storage):
                 participants = [m.UserID(r[0]) for r in participant_rows]
                 return cls(
                     id=m.ChatID(row[0]),
-                    title=row[1] or "",
-                    description=row[2] or "",
+                    secret=row[1],
+                    title=row[2] or "",
+                    description=row[3] or "",
                     participants=participants,
                 )
 
             async def save(self) -> None:
                 connection.execute(
-                    "UPDATE chat SET title = ?, description = ? WHERE id = ?",
-                    (self.title, self.description, str(self.id)),
+                    "UPDATE chat SET secret = ?, title = ?, description = ? WHERE id = ?",
+                    (self.secret, self.title, self.description, str(self.id)),
                 )
                 # Sync participants: delete all and re-insert
                 connection.execute(

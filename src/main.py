@@ -1,16 +1,16 @@
 import asyncio
-from datetime import datetime, timezone
-import itertools
 import json
-from mimetypes import init
 import secrets
-from typing import cast
+from uuid import uuid4
 import dotenv
+
+from datetime import datetime, timezone
+from typing import cast
+
 from encryption import UserEncryption
 from kademlia.kademlia import ChatMsgPayload, KademliaNode, kademlia_key, Handler as KademliaHandler
-from kademlia.types import KademliaKey
+from kademlia.types import ContentType, KademliaKey
 from logging_setup import setup_logging
-
 from config import Config
 from db.sqlite_impl import SqliteDatabase
 from models import Chat, ChatID, MessageID, User, UserID
@@ -28,109 +28,133 @@ async def main():
     setup_logging()
 
     config = Config.from_env()
-    
+
     socket = SocketHandler()
-    
+
     kademlia: KademliaNode | None = None
-    
+
     database = await SqliteDatabase.create(config.sqlite_path)
-    
+
     async def create_kademlia(ue: UserEncryption):
         nonlocal kademlia
         if kademlia is not None:
             await kademlia.close()
-            
+
         kademlia = KademliaNode(
-            socket=socket, 
-            node_id=kademlia_key(ue.user.public_identity), 
-            pubkey=ue.user.public_identity, 
-            encryption=ue, 
+            socket=socket,
+            node_id=kademlia_key(ue.user.public_identity),
+            pubkey=ue.user.public_identity,
+            encryption=ue,
             handler=KademliaHandler(
                 chat_msg_received
             )
         )
         await kademlia.run()
-    
-    async def send_message(user: UserID, chat: ChatID, content: bytes, content_type: str):
-        if not kademlia: return
-        assert content_type == "text/plain"
-        
-        participants = (await database.Chat.by_id(chat)).participants
-        others = [p for p in participants if p != user]
+
+    async def send_message(user_id: UserID, chat_id: ChatID, content: bytes, content_type: ContentType):
+        if not kademlia:
+            return # TODO: This should not fail silently
+
+        chat = await database.Chat.by_id(chat_id)
+        others = [p for p in chat.participants if p != user_id]
         assert len(others) == 1
         target_peer_id = (await database.User.by_id(others[0])).id
-        
-        if not await kademlia.chat_msg_req(peer_id=target_peer_id, chat_id=chat, message=content, content_type=content_type):
+
+        if not await kademlia.chat_msg_req(peer_id=target_peer_id, chat_id=chat_id, shared_secret=chat.secret, message=content, content_type=content_type):
             raise RuntimeError(f"Message could not be sent in time")
-        
-    
-    async def chat_msg_received(sender_key: KademliaKey, payload: ChatMsgPayload):
-        sender = (await database.User.by_id(sender_key))
+
+
+    async def chat_msg_received(sender_key: KademliaKey, sender_pubkey: bytes, payload: ChatMsgPayload):
+        sender = await database.User.register_peer(UserID(sender_key), sender_pubkey)
         sender_name = cast(str, sender.name or sender.id)
-        
+
         chat_id = ChatID(payload.chat_id)
-        
+
         try:
             target_chat = await database.Chat.by_id(chat_id)
         except KeyError:
             await ui.wait_for(lambda: ui.user)
             current_user = cast(UserID, ui.user)
-            raise NotImplementedError  # TODO: we first need to receive the chat secret before establishing a chat
-            target_chat = await database.Chat.create(secret=chat_secret, title=sender_name, description=f"Chat between you and {sender_name}", participants=[current_user, sender.id])
+            # raise NotImplementedError  # TODO: we first need to receive the chat secret before establishing a chat
+            target_chat = await database.Chat.create(chat_id=chat_id, secret=payload.shared_secret, title=sender_name, description=f"Chat between you and {sender_name}", participants=[current_user, sender.id])
 
         last_messages = await target_chat.messages(1)
         if not last_messages:
             prev_id = target_chat.secret
         else:
             prev_id = last_messages[0]
-        
+
+        # TODO: This is broken because B64Bytes are only serialized when model_dump_json is used
         msg_id = MessageID(kademlia_key(prev_id + json.dumps(
-            payload.model_dump(), 
-            ensure_ascii=False, 
-            allow_nan=False, 
-            separators=(",", ":"), 
+            payload.model_dump(),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
             sort_keys=True
         ).encode("utf-8")))
-        
+
         ts = datetime.now(tz=timezone.utc)  # TODO: we need the timestamp from the other user! When it was sent, not received
         message = await database.Message.create(id=msg_id, chat=target_chat.id, sender=sender.id, timestamp=ts, content=payload.message, content_type=payload.content_type)
         await ui.received_message(message)
-        
-    
+
+
     async def create_user(name: str) -> User:
         ue = await UserEncryption.create_new_user(storage=database, name=name)
         await create_kademlia(ue)
         return ue.user
-    
-    
+
+
     async def selection_update(user: UserID | None, chat: ChatID | None):
         nonlocal kademlia
         if user is not None:
             if kademlia is not None and kademlia.node_id == user:
                 return # nothing to do here
-            
+
             ue = cast(UserEncryption, await UserEncryption.from_existing(await database.User.by_id(user)))
             await create_kademlia(ue)
         else:
             if kademlia is not None:
                 await kademlia.close()
                 kademlia = None
-    
+
     async def execute_command(user: UserID | None, chat: ChatID | None, args: list[str]):
         pass
-    
-    async def conntect_to(self: UserID, peer_id: KademliaKey) -> Chat:
+
+    async def initialize_chat(self: UserID, peer_id: KademliaKey) -> Chat:
         assert kademlia
-        peer = await kademlia.resolve_peer(peer_id)
         timeout = 10.0
-        if not await kademlia.ping(peer_id=peer_id, timeout=timeout):
+        try:
+            peer = await kademlia.get_peer_infos(peer_id, timeout=timeout)
+        except asyncio.TimeoutError:
             raise TimeoutError(f"Peer didn't react in {timeout} seconds")
-        
-        # i guess we can create a chat now and call it a day?
-        peer_name = str(peer.ip) # TODO: fetch metadata about other peer
-        chat_secret = ChatID(secrets.token_bytes(32)) # we create a random (important!) chat secret
-        target_chat = await database.Chat.create(secret=chat_secret, title=peer_name, description=f"Chat between you and {peer_name}", participants=[self, UserID(peer_id)])
-        return target_chat
+
+        peer_name = str(peer.ip) # TODO: implement name alias for nodes and use this instead
+        peer_user = await database.User.register_peer(
+            id=UserID(KademliaKey(peer.id)),
+            public_identity=peer.pubkey,
+            name=peer_name
+        )
+
+        shared_secret = secrets.token_bytes(32) # 256 Bit, cryptographically safe
+        chat = await database.Chat.create(
+            chat_id=ChatID(uuid4().bytes),
+            secret=shared_secret,
+            title=peer_name,
+            description=f"Chat between you and {peer_name}",
+            participants=[self, peer_user.id],
+        )
+        # Send an initial chat message so, the chat partner learns about the shared secret
+        chat_init_success = await kademlia.chat_msg_req(
+            peer_id=peer_id,
+            chat_id=chat.id,
+            shared_secret=chat.secret,
+            message=f"Chat Init from {kademlia.node_id}".encode("utf-8"),
+            content_type="text/plain",
+        )
+        if not chat_init_success:
+            await chat.delete()
+            raise RuntimeError(f"Chat init message could not be delivered to peer in time")
+        return chat
 
     # this context manager automatically does necessary resource management
     ui_handler = UIHandler(
@@ -138,7 +162,7 @@ async def main():
         create_user,
         selection_update,
         execute_command,
-        conntect_to
+        initialize_chat
     )
     ui: SimpleTerminalUI = await SimpleTerminalUI.create(database=database, handler=ui_handler)
     await ui.run_to_completion()

@@ -127,7 +127,7 @@ def test_payload_type_must_match_msg_type():
         (
             MsgType.CHAT_MSG,
             ChatMsgPayload(
-                chat_id=os.urandom(32),
+                chat_id=uuid4().bytes,
                 message=b"hello!",
                 shared_secret=os.urandom(32),
                 content_type="text/plain"
@@ -652,7 +652,7 @@ class TestKademliaNode:
         req = make_msg(
             MsgType.CHAT_MSG,
             ChatMsgPayload(
-                chat_id=os.urandom(32),
+                chat_id=uuid4().bytes,
                 shared_secret=os.urandom(32),
                 message=b"hello",
                 content_type="text/plain",
@@ -668,7 +668,7 @@ class TestKademliaNode:
         req = make_msg(
             MsgType.CHAT_MSG,
             ChatMsgPayload(
-                chat_id=os.urandom(32),
+                chat_id=uuid4().bytes,
                 shared_secret=os.urandom(32),
                 message=b"hello",
                 content_type="text/plain",
@@ -680,7 +680,7 @@ class TestKademliaNode:
 
     def test_chat_msg_rejects_wrong_size_chat_id(self):
         # chat_id must be exactly 32 bytes.
-        for bad_len in (0, 16, 31, 33):
+        for bad_len in (0, 32, 15, 17):
             with pytest.raises(ValueError):
                 ChatMsgPayload(
                     chat_id=os.urandom(bad_len),
