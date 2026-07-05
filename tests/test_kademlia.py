@@ -126,7 +126,12 @@ def test_payload_type_must_match_msg_type():
         ),
         (
             MsgType.CHAT_MSG,
-            ChatMsgPayload(chat_id=os.urandom(32), message=b"hello!", content_type="text/plain")
+            ChatMsgPayload(
+                chat_id=os.urandom(32),
+                message=b"hello!",
+                shared_secret=os.urandom(32),
+                content_type="text/plain"
+            )
         )
     ],
 )
@@ -648,6 +653,7 @@ class TestKademliaNode:
             MsgType.CHAT_MSG,
             ChatMsgPayload(
                 chat_id=os.urandom(32),
+                shared_secret=os.urandom(32),
                 message=b"hello",
                 content_type="text/plain",
             ),
@@ -663,6 +669,7 @@ class TestKademliaNode:
             MsgType.CHAT_MSG,
             ChatMsgPayload(
                 chat_id=os.urandom(32),
+                shared_secret=os.urandom(32),
                 message=b"hello",
                 content_type="text/plain",
             ),
@@ -672,14 +679,28 @@ class TestKademliaNode:
         assert reply.in_reply_to == req.msg_id
 
     def test_chat_msg_rejects_wrong_size_chat_id(self):
-        # chat_id is the shared chat secret and must be exactly 32 bytes.
+        # chat_id must be exactly 32 bytes.
         for bad_len in (0, 16, 31, 33):
             with pytest.raises(ValueError):
                 ChatMsgPayload(
                     chat_id=os.urandom(bad_len),
+                    shared_secret=os.urandom(32),
                     message=b"hello",
                     content_type="text/plain",
                 )
+
+    def test_chat_msg_rejects_wrong_size_shared_secret(self):
+        # shared_secret and must be exactly 32 bytes.
+        for bad_len in (0, 16, 31, 33):
+            with pytest.raises(ValueError):
+                ChatMsgPayload(
+                    chat_id=os.urandom(32),
+                    shared_secret=os.urandom(bad_len),
+                    message=b"hello",
+                    content_type="text/plain",
+                )
+
+
 
     # ---- recv_loop -----------------------------------------------------------
 

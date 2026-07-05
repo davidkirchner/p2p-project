@@ -98,6 +98,7 @@ class FindValueReplyPayload(Payload):
 
 class ChatMsgPayload(Payload):
     chat_id: B64Bytes = Field(min_length=32, max_length=32)
+    shared_secret: B64Bytes = Field(min_length=32, max_length=32)
     message: B64Bytes
     content_type: Literal["text/plain"]
 
@@ -316,12 +317,12 @@ class _Pending:
     future: asyncio.Future[KademliaMsg]
     peer_ip: str
     reply_type: MsgType
-    
-    
+
+
 class Handler(HandlerBase):
     async def chat_msg_received(self, sender: KademliaKey, payload: ChatMsgPayload):
         pass
-    
+
 
 class KademliaNode(Closable):
     """Provides Kademlia logic and RPCs. Communicates via SocketHandler
@@ -539,9 +540,8 @@ class KademliaNode(Closable):
         )
         await self._send(dest_ip, msg)
 
-    async def chat_msg_req(self, peer_id: bytes, chat_id: bytes, message: bytes,
-                           content_type: Literal["text/plain"],
-                           timeout: float = 5.0) -> bool:
+    async def chat_msg_req(self, peer_id: bytes, chat_id: bytes, shared_secret: bytes, message: bytes,
+                           content_type: Literal["text/plain"], timeout: float = 5.0) -> bool:
         """
         Sends an application level CHAT MESSAGE. Returns 'True' if the recipient acknowledges it before timeout,
         'False' otherwise
@@ -552,6 +552,7 @@ class KademliaNode(Closable):
             msg_type=MsgType.CHAT_MSG,
             payload=ChatMsgPayload(
                 chat_id=chat_id,
+                shared_secret=shared_secret,
                 message=message,
                 content_type=content_type
             ),
@@ -647,7 +648,7 @@ class KademliaNode(Closable):
                 )
         elif msg.msg_type is MsgType.CHAT_MSG:
             assert isinstance(msg.payload, ChatMsgPayload)
-            
+
             logger.debug(
                 "Received chat message from %s: %s",
                 sender_ip,
@@ -658,7 +659,7 @@ class KademliaNode(Closable):
                 in_reply_to=msg.msg_id,
                 success=True
             )
-            
+
             self.bind_closable(self.handler.chat_msg_received(KademliaKey(msg.sender_id), msg.payload))
         else:
             logger.debug(f"Received message with unknown msg_type: {msg}")
