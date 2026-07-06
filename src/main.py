@@ -165,7 +165,8 @@ async def main():
         )
         if not chat_init_success:
             await chat.delete()
-            raise RuntimeError(f"Chat init message could not be delivered to peer in time")
+            # See chat_msg_received for possible failures
+            raise RuntimeError(f"Chat initialization failed")
         return chat
 
     # this context manager automatically does necessary resource management
