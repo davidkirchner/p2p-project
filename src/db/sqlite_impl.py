@@ -32,7 +32,7 @@ class SqliteDatabase(m.Storage):
 
         connection.executescript("""
         CREATE TABLE IF NOT EXISTS user (
-            id TEXT NOT NULL PRIMARY KEY,
+            id BLOB NOT NULL PRIMARY KEY,
             name TEXT NOT NULL,
             public_identity BLOB,
             private_identity BLOB
@@ -51,7 +51,7 @@ class SqliteDatabase(m.Storage):
             FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS message (
-            id TEXT NOT NULL PRIMARY KEY,
+            id BLOB NOT NULL PRIMARY KEY,
             chat BLOB NOT NULL,
             sender TEXT NOT NULL,
             timestamp TEXT NOT NULL,
@@ -76,7 +76,7 @@ class SqliteDatabase(m.Storage):
                 user_id = m.UserID(id)
                 connection.execute(
                     "INSERT INTO user (id, name, public_identity, private_identity) VALUES (?, ?, ?, ?)",
-                    (str(user_id), name, public_identity, private_identity),
+                    (user_id, name, public_identity, private_identity),
                 )
                 connection.commit()
                 return await cls.by_id(user_id)
@@ -88,7 +88,7 @@ class SqliteDatabase(m.Storage):
                 connection.execute(
                     "INSERT INTO user (id, name, public_identity, private_identity) "
                     "VALUES (?, ?, ?, NULL) ON CONFLICT(id) DO NOTHING",
-                    (str(user_id), name, public_identity),
+                    (user_id, name, public_identity),
                 )
                 connection.commit()
                 return await cls.by_id(user_id)
@@ -97,7 +97,7 @@ class SqliteDatabase(m.Storage):
             async def by_id(cls, id: m.UserID) -> "User":
                 row = connection.execute(
                     "SELECT id, name, public_identity, private_identity FROM user WHERE id = ?",
-                    (str(id),)
+                    (id,)
                 ).fetchone()
                 if row is None:
                     raise KeyError(f"User with id {id} not found")
@@ -111,25 +111,25 @@ class SqliteDatabase(m.Storage):
             async def save(self) -> None:
                 connection.execute(
                     "UPDATE user SET name = ?, public_identity = ?, private_identity = ? WHERE id = ?",
-                    (self.name, self.public_identity, self.private_identity, str(self.id)),
+                    (self.name, self.public_identity, self.private_identity, self.id),
                 )
                 connection.commit()
 
             async def delete(self) -> None:
                 connection.execute(
                     "DELETE FROM chat_participant WHERE user_id = ?",
-                    (str(self.id),)
+                    (self.id,)
                 )
                 connection.execute(
                     "DELETE FROM user WHERE id = ?",
-                    (str(self.id),)
+                    (self.id,)
                 )
                 connection.commit()
 
             async def chats(self) -> list[m.ChatID]:
                 rows = connection.execute(
                     "SELECT chat_id FROM chat_participant WHERE user_id = ?",
-                    (str(self.id),)
+                    (self.id,)
                 ).fetchall()
                 return [m.ChatID(r[0]) for r in rows]
 
@@ -154,12 +154,12 @@ class SqliteDatabase(m.Storage):
             async def create(cls, chat_id: m.ChatID, secret: bytes, title: str, description: str = "", participants: list[m.UserID] | None = None) -> "Chat":
                 connection.execute(
                     "INSERT INTO chat (id, secret, title, description) VALUES (?, ?, ?, ?)",
-                    (str(chat_id), secret, title, description),
+                    (chat_id, secret, title, description),
                 )
                 for uid in (participants or []):
                     connection.execute(
                         "INSERT INTO chat_participant (chat_id, user_id) VALUES (?, ?)",
-                        (str(chat_id), str(uid)),
+                        (chat_id, uid),
                     )
                 connection.commit()
                 return await cls.by_id(chat_id)
@@ -168,13 +168,13 @@ class SqliteDatabase(m.Storage):
             async def by_id(cls, id: m.ChatID) -> "Chat":
                 row = connection.execute(
                     "SELECT id, secret, title, description FROM chat WHERE id = ?",
-                    (str(id),)
+                    (id,)
                 ).fetchone()
                 if row is None:
                     raise KeyError(f"Chat with id {id} not found")
                 participant_rows = connection.execute(
                     "SELECT user_id FROM chat_participant WHERE chat_id = ?",
-                    (str(id),)
+                    (id,)
                 ).fetchall()
                 participants = [m.UserID(r[0]) for r in participant_rows]
                 return cls(
@@ -188,32 +188,32 @@ class SqliteDatabase(m.Storage):
             async def save(self) -> None:
                 connection.execute(
                     "UPDATE chat SET secret = ?, title = ?, description = ? WHERE id = ?",
-                    (self.secret, self.title, self.description, str(self.id)),
+                    (self.secret, self.title, self.description, self.id),
                 )
                 # Sync participants: delete all and re-insert
                 connection.execute(
                     "DELETE FROM chat_participant WHERE chat_id = ?",
-                    (str(self.id),)
+                    (self.id,)
                 )
                 for uid in self.participants:
                     connection.execute(
                         "INSERT INTO chat_participant (chat_id, user_id) VALUES (?, ?)",
-                        (str(self.id), str(uid)),
+                        (self.id, uid),
                     )
                 connection.commit()
 
             async def delete(self) -> None:
                 connection.execute(
                     "DELETE FROM chat_participant WHERE chat_id = ?",
-                    (str(self.id),)
+                    (self.id,)
                 )
                 connection.execute(
                     "DELETE FROM message WHERE chat = ?",
-                    (str(self.id),)
+                    (self.id,)
                 )
                 connection.execute(
                     "DELETE FROM chat WHERE id = ?",
-                    (str(self.id),)
+                    (self.id,)
                 )
                 connection.commit()
 
@@ -222,7 +222,7 @@ class SqliteDatabase(m.Storage):
                     before = datetime.now(tz=timezone.utc)
                 rows = connection.execute(
                     "SELECT id FROM message WHERE chat = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT ?",
-                    (str(self.id), before.isoformat(), n)
+                    (self.id, before.isoformat(), n)
                 ).fetchall()
                 return [m.MessageID(r[0]) for r in rows]
 
@@ -244,7 +244,7 @@ class SqliteDatabase(m.Storage):
                 message_id = id
                 connection.execute(
                     "INSERT INTO message (id, chat, sender, timestamp, content, content_type) VALUES (?, ?, ?, ?, ?, ?)",
-                    (str(message_id), str(chat), str(sender), timestamp.isoformat(), content, content_type),
+                    (message_id, chat, sender, timestamp.isoformat(), content, content_type),
                 )
                 connection.commit()
                 return await cls.by_id(message_id)
@@ -253,7 +253,7 @@ class SqliteDatabase(m.Storage):
             async def by_id(cls, id: m.MessageID) -> "Message":
                 row = connection.execute(
                     "SELECT id, chat, sender, timestamp, content, content_type FROM message WHERE id = ?",
-                    (str(id),)
+                    (id,)
                 ).fetchone()
                 if row is None:
                     raise KeyError(f"Message with id {id} not found")
@@ -269,14 +269,14 @@ class SqliteDatabase(m.Storage):
             async def save(self) -> None:
                 connection.execute(
                     "UPDATE message SET chat = ?, sender = ?, timestamp = ?, content = ?, content_type = ? WHERE id = ?",
-                    (str(self.chat), str(self.sender), self.timestamp.isoformat(), self.content, self.content_type, str(self.id)),
+                    (self.chat, self.sender, self.timestamp.isoformat(), self.content, self.content_type, self.id),
                 )
                 connection.commit()
 
             async def delete(self) -> None:
                 connection.execute(
                     "DELETE FROM message WHERE id = ?",
-                    (str(self.id),)
+                    (self.id,)
                 )
                 connection.commit()
 
