@@ -325,7 +325,7 @@ class _Pending:
 
 
 class Handler(HandlerBase):
-    async def chat_msg_received(self, sender: KademliaKey, sender_pubkey: bytes, payload: ChatMsgPayload):
+    async def chat_msg_received(self, sender: PeerInfo, payload: ChatMsgPayload):
         pass
 
 
@@ -676,8 +676,12 @@ class KademliaNode(Closable):
                 in_reply_to=msg.msg_id,
                 success=True
             )
+            peer = PeerInfo(id=msg.sender_id, ip=sender_ip, pubkey=msg.sender_pubkey)
+            self.bind_closable(self.handler.chat_msg_received(
+                sender=peer,
+                payload=msg.payload
+            ))
 
-            self.bind_closable(self.handler.chat_msg_received(KademliaKey(msg.sender_id), msg.sender_pubkey, msg.payload))
         else:
             logger.debug(f"Received message with unknown msg_type: {msg}")
             return

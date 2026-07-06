@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import cast
 
 from encryption import UserEncryption
-from kademlia.kademlia import ChatMsgPayload, KademliaNode, kademlia_key, Handler as KademliaHandler
+from kademlia.kademlia import ChatMsgPayload, KademliaNode, PeerInfo, kademlia_key, Handler as KademliaHandler
 from kademlia.types import ContentType, KademliaKey
 from logging_setup import setup_logging
 from config import Config
@@ -64,19 +64,33 @@ async def main():
             raise RuntimeError(f"Message could not be sent in time")
 
 
-    async def chat_msg_received(sender_key: KademliaKey, sender_pubkey: bytes, payload: ChatMsgPayload):
-        sender = await database.User.register_peer(UserID(sender_key), sender_pubkey)
-        sender_name = cast(str, sender.name or sender.id)
+    async def chat_msg_received(sender: PeerInfo, payload: ChatMsgPayload):
+        sender_name = sender.ip
+        sender_user = await database.User.register_peer(UserID(KademliaKey(sender.id)), sender.pubkey, sender_name)
 
         chat_id = ChatID(payload.chat_id)
 
         try:
             target_chat = await database.Chat.by_id(chat_id)
+            if sender.id not in target_chat.participants:
+                # Something is fishy here
+                # chat_id collision by accident or sender tries to spoof a chat
+                # TODO: report error back to kademlia
+                pass
+            if payload.shared_secret != target_chat.secret:
+                # same here for the secret
+                # TODO: report error back to kademlia
+                pass
         except KeyError:
-            await ui.wait_for(lambda: ui.user)
-            current_user = cast(UserID, ui.user)
-            # raise NotImplementedError  # TODO: we first need to receive the chat secret before establishing a chat
-            target_chat = await database.Chat.create(chat_id=chat_id, secret=payload.shared_secret, title=sender_name, description=f"Chat between you and {sender_name}", participants=[current_user, sender.id])
+            assert kademlia # This handler is only called if kademlia node is running
+            current_user = UserID(KademliaKey(kademlia.node_id))
+            target_chat = await database.Chat.create(
+                chat_id=chat_id,
+                secret=payload.shared_secret,
+                title=sender_name,
+                description=f"Chat between you and {sender_name}",
+                participants=[current_user, sender_user.id]
+            )
 
         last_messages = await target_chat.messages(1)
         if not last_messages:
@@ -94,8 +108,10 @@ async def main():
         ).encode("utf-8")))
 
         ts = datetime.now(tz=timezone.utc)  # TODO: we need the timestamp from the other user! When it was sent, not received
-        message = await database.Message.create(id=msg_id, chat=target_chat.id, sender=sender.id, timestamp=ts, content=payload.message, content_type=payload.content_type)
+        message = await database.Message.create(id=msg_id, chat=target_chat.id, sender=sender_user.id, timestamp=ts, content=payload.message, content_type=payload.content_type)
         await ui.received_message(message)
+        # TODO: This handler must return success/ failure back to kademlia in order
+        # to set ChatMsgResponse.success properly
 
 
     async def create_user(name: str) -> User:
