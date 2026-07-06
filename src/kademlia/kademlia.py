@@ -671,16 +671,23 @@ class KademliaNode(Closable):
                 sender_ip,
                 msg.payload.message
             )
+            peer = PeerInfo(id=msg.sender_id, ip=sender_ip, pubkey=msg.sender_pubkey)
+            try:
+                await self.handler.chat_msg_received(
+                    sender=peer,
+                    payload=msg.payload
+                )
+            except Exception: # Spoofed ChatID, wrong secret, ...
+                success = False
+            else:
+                success = True
+
             await self._chat_msg_reply(
                 dest_ip=sender_ip,
                 in_reply_to=msg.msg_id,
-                success=True
+                success=success
             )
-            peer = PeerInfo(id=msg.sender_id, ip=sender_ip, pubkey=msg.sender_pubkey)
-            self.bind_closable(self.handler.chat_msg_received(
-                sender=peer,
-                payload=msg.payload
-            ))
+
 
         else:
             logger.debug(f"Received message with unknown msg_type: {msg}")

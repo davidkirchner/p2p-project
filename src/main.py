@@ -73,14 +73,11 @@ async def main():
         try:
             target_chat = await database.Chat.by_id(chat_id)
             if sender.id not in target_chat.participants:
-                # Something is fishy here
                 # chat_id collision by accident or sender tries to spoof a chat
-                # TODO: report error back to kademlia
-                pass
+                raise ValueError(f"SenderID is not a participant of chat {chat_id}")
             if payload.shared_secret != target_chat.secret:
                 # same here for the secret
-                # TODO: report error back to kademlia
-                pass
+                raise ValueError(f"Chat secret does not match secret from existing chat {chat_id}")
         except KeyError:
             assert kademlia # This handler is only called if kademlia node is running
             current_user = UserID(KademliaKey(kademlia.node_id))
@@ -108,10 +105,9 @@ async def main():
         ).encode("utf-8")))
 
         ts = datetime.now(tz=timezone.utc)  # TODO: we need the timestamp from the other user! When it was sent, not received
+        # TODO: Deuplication! The same message may arrive twice => Message.create will fail
         message = await database.Message.create(id=msg_id, chat=target_chat.id, sender=sender_user.id, timestamp=ts, content=payload.message, content_type=payload.content_type)
         await ui.received_message(message)
-        # TODO: This handler must return success/ failure back to kademlia in order
-        # to set ChatMsgResponse.success properly
 
 
     async def create_user(name: str) -> User:
