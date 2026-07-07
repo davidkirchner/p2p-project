@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import cast
 
 from encryption import UserEncryption
-from kademlia.kademlia import ChatMsgPayload, KademliaNode, PeerInfo, kademlia_key, Handler as KademliaHandler
+from kademlia.kademlia import ChatMsgPayload, KademliaNode, Peer, kademlia_key, Handler as KademliaHandler
 from kademlia.types import ContentType, KademliaKey
 from logging_setup import setup_logging
 from config import Config
@@ -42,8 +42,8 @@ async def main():
 
         kademlia = KademliaNode(
             socket=socket,
-            node_id=kademlia_key(ue.user.public_identity),
-            pubkey=ue.user.public_identity,
+            node_id=ue.id,
+            pubkey=ue.public_bytes,
             encryption=ue,
             handler=KademliaHandler(
                 chat_msg_received
@@ -64,7 +64,7 @@ async def main():
             raise RuntimeError(f"Message could not be sent in time")
 
 
-    async def chat_msg_received(sender: PeerInfo, payload: ChatMsgPayload):
+    async def chat_msg_received(sender: Peer, payload: ChatMsgPayload):
         sender_name = sender.ip
         sender_user = await database.User.register_peer(UserID(KademliaKey(sender.id)), sender.pubkey, sender_name)
 
@@ -99,14 +99,22 @@ async def main():
 
         ts = datetime.now(tz=timezone.utc)  # TODO: we need the timestamp from the other user! When it was sent, not received
         # TODO: Deuplication! The same message may arrive twice => Message.create will fail
-        message = await database.Message.create(id=msg_id, chat=target_chat.id, sender=sender_user.id, timestamp=ts, content=payload.message, content_type=payload.content_type)
+        message = await database.Message.create(
+            id=msg_id, 
+            chat=target_chat.id, 
+            sender=sender_user.id, 
+            timestamp=ts, 
+            content=payload.message, 
+            content_type=payload.content_type
+        )
         await ui.received_message(message)
 
 
     async def create_user(name: str) -> User:
-        ue = await UserEncryption.create_new_user(storage=database, name=name)
+        ue = UserEncryption.create()
+        user = await ue.store_as_user(storage=database, name=name)
         await create_kademlia(ue)
-        return ue.user
+        return user
 
 
     async def selection_update(user: UserID | None, chat: ChatID | None):
@@ -115,7 +123,7 @@ async def main():
             if kademlia is not None and kademlia.node_id == user:
                 return # nothing to do here
 
-            ue = cast(UserEncryption, await UserEncryption.from_existing(await database.User.by_id(user)))
+            ue = cast(UserEncryption, await UserEncryption.from_stored(await database.User.by_id(user)))
             await create_kademlia(ue)
         else:
             if kademlia is not None:

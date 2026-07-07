@@ -5,6 +5,8 @@ from collections import deque
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
+from kademlia.types import KademliaKey
+
 from .kademlia import ALPHA, Peer, byte_xor
 
 if TYPE_CHECKING:
@@ -18,7 +20,7 @@ class ReplyOutcome(Enum):
 
 
 class IterativeLookup[T]:
-    def __init__(self, buckets: Buckets, node_id: bytes, target: bytes) -> None:
+    def __init__(self, buckets: Buckets, node_id: bytes, target: KademliaKey) -> None:
         self.buckets = buckets
         self.node_id = node_id
         self.target = target
@@ -93,12 +95,12 @@ class IterativeLookup[T]:
 
 
 class NodeLookup(IterativeLookup[list[Peer]]):
-    def __init__(self, node: KademliaNode, target: bytes) -> None:
+    def __init__(self, node: KademliaNode, target: KademliaKey) -> None:
         super().__init__(node.buckets, node.node_id, target)
         self._node = node
 
     async def _query_peer(self, peer: Peer):
-        return await self._node._find_node_req(peer.ip, self.target, peer_id=peer.id)
+        return await self._node._find_node_req(self.target, peer)
 
     def _handle_reply(self, result) -> ReplyOutcome:
         improved = self._add_peers(result or [])
@@ -109,14 +111,14 @@ class NodeLookup(IterativeLookup[list[Peer]]):
 
 
 class ValueLookup(IterativeLookup[bytes]):
-    def __init__(self, node: KademliaNode, key: bytes) -> None:
+    def __init__(self, node: KademliaNode, key: KademliaKey) -> None:
         super().__init__(node.buckets, node.node_id, key)
         self._key = key
         self._node = node
         self._value: bytes | None = None
 
     async def _query_peer(self, peer: Peer):
-        return await self._node._find_value_req(dest_ip=peer.ip, peer_id=peer.id, key=self.target)
+        return await self._node._find_value_req(peer, self.target)
 
     def _handle_reply(self, result: FindValueReplyPayload | None) -> ReplyOutcome:
         if result is None:

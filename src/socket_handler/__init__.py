@@ -13,6 +13,8 @@ type OutboxData = tuple[str, int, bytes]
 class AnySocketHandler(Protocol):
     inbox_queue: asyncio.Queue[InboxData]
     outbox_queue: asyncio.Queue[OutboxData]
+    ip: str
+    port: int
     
     async def start(self, host, port): ...
     async def close(self): ...
