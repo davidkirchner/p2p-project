@@ -339,7 +339,7 @@ class KademliaNode(Closable):
     populates k-Buckets when started.
     """
 
-    def __init__(self, socket: AnySocketHandler, node_id: KademliaKey, pubkey: bytes, encryption: UserEncryption, handler: Handler, port: int = KADEMLIA_PORT) -> None:
+    def __init__(self, socket: AnySocketHandler, node_id: KademliaKey, pubkey: bytes, encryption: UserEncryption, handler: Handler, port: int = KADEMLIA_PORT, encrypt: bool = True) -> None:
         super().__init__()
         self.socket = socket
         self.node_id = node_id
@@ -350,6 +350,7 @@ class KademliaNode(Closable):
         self.loop = asyncio.get_running_loop()
         self.dht: dict[bytes, Any] = {} # TODO: store this in a more appropriate way
         self.handler = handler
+        self.encrypt = encrypt
         # Outstanding requests awaiting a reply, keyed by the request's msg_id.
         self._pending_by_msg_id: dict[MsgId, _Pending] = {}
         
@@ -402,9 +403,12 @@ class KademliaNode(Closable):
 
     async def _send(self, dest: Peer, msg: KademliaMsg) -> None:
         """Fire-and-forget primitive: hand a message to the socket outbox."""
-        encr = PeerEncryption.from_peer(id=KademliaKey(dest.id), public_bytes=dest.pubkey)
         msg_bytes = msg.to_bytes()
-        msg_bytes_encr = self.encryption.encrypt(msg=msg_bytes, receiver=encr)
+        if self.encrypt:
+            encr = PeerEncryption.from_peer(id=KademliaKey(dest.id), public_bytes=dest.pubkey)
+            msg_bytes_encr = self.encryption.encrypt(msg=msg_bytes, receiver=encr) 
+        else:
+            msg_bytes_encr = EncryptedMsg(msg_bytes)
         await self.socket.outbox_queue.put((dest.ip, KADEMLIA_PORT, msg_bytes_encr))
 
     async def request(self, *, msg: KademliaMsg, peer: Peer | KademliaKey, timeout: float = 5.0) -> KademliaMsg:
@@ -708,24 +712,22 @@ class KademliaNode(Closable):
 
     async def recv_loop(self):
         while True:
-            inbox_item = await self.socket.inbox_queue.get()
-            sender_ip = inbox_item[0]
-            raw_msg_encr = EncryptedMsg(inbox_item[1])
+            sender_ip, raw_msg_encr = await self.socket.inbox_queue.get()
             
             try:
-                raw_msg = self.encryption.decrypt(raw_msg_encr)
+                raw_msg = self.encryption.decrypt(raw_msg_encr) if self.encrypt else raw_msg_encr
                 parsed = KademliaMsg.from_bytes(raw_msg)
                 parsed.verify_signature()
             except ValueError as e:
                 # Malformed / unverifiable message (bad JSON,
                 # payload/type mismatch, ...). Drop it and keep serving.
-                logger.warning(f"Discarding invalid message from {sender_ip}", sender_ip, exc_info=e)
+                logger.warning(f"Discarding invalid message from {sender_ip}", exc_info=e)
                 continue
             except CryptoError as e:
-                logger.warning(f"Decryption error for message from {sender_ip}", sender_ip, exc_info=e)
+                logger.warning(f"Decryption error for message from {sender_ip}", exc_info=e)
                 continue
             except InvalidSignature as e:
-                logger.warning(f"Message from {sender_ip} has invalid signature", sender_ip, exc_info=e)
+                logger.warning(f"Message from {sender_ip} has invalid signature", exc_info=e)
                 continue
             
             logger.debug(f"Received {parsed.msg_type.value} from {sender_ip}")

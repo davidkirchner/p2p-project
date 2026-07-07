@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
-from encryption import PeerEncryption, UserEncryption
+from encryption import EncryptedMsg, PeerEncryption, UserEncryption
 from kademlia.kademlia import (
     Buckets,
     ID_SPACE,
@@ -59,7 +59,7 @@ def random_key() -> KademliaKey:
 
 def mock_peer(ip: str, id: KademliaKey | None = None) -> Peer:
     """Creates a non-functioning Peer out of thin air. DO NOT USE FOR ENCRYPTION, DOES NOT WORK! Only mock some values with this one."""
-    return Peer(id=id if id is not None else random_key(), ip=ip, pubkey=bytes())
+    return Peer(id=id if id is not None else random_key(), ip=ip, pubkey=random_key())
 
 
 def make_msg(msg_type: MsgType, payload: Payload | dict, **overrides) -> KademliaMsg:
@@ -205,9 +205,9 @@ class TestBuckets:
 
     def test_successful_contact_adds_new_peer(self):
         buckets, _ = make_buckets()
-        peer_id = peer_id_at(5)
-        buckets.register_successful_contact(mock_peer("10.0.0.5", peer_id))
-        assert buckets.get_peer(peer_id) == mock_peer("10.0.0.5", peer_id)
+        peer = mock_peer("10.0.0.5", peer_id_at(5))
+        buckets.register_successful_contact(peer)
+        assert buckets.get_peer(peer.id) == peer
 
     def test_get_peer_returns_none_for_unknown(self):
         buckets, _ = make_buckets()
@@ -291,7 +291,7 @@ class TestBuckets:
 
         buckets.register_successful_contact(mock_peer("10.0.0.3", c))
         # cached peer should have replaced failed peer
-        assert buckets.get_peer(c) == mock_peer(id=c, ip="10.0.0.3")
+        assert (t := buckets.get_peer(c)) is not None and t.id == c
         # and be removed from the cache
         assert c not in buckets._cache_for(c)
 
@@ -412,7 +412,7 @@ def build_node(*, port: int = KADEMLIA_PORT) -> KademliaNode:
     """
     node_id, pubkey, signer = new_identity()
     from kademlia.kademlia import Handler as KademliaHandler
-    return KademliaNode(SocketHandler(), node_id, pubkey, signer, port=port, handler=KademliaHandler())
+    return KademliaNode(SocketHandler(), node_id, pubkey, signer, port=port, handler=KademliaHandler(), encrypt=False)
 
 
 async def get_outbox(node: KademliaNode, timeout: float = 1.0):
@@ -504,9 +504,12 @@ class TestKademliaNode:
         # messages always go to the network-wide KADEMLIA_PORT.
         node = build_node(port=1234)
         ip = "203.0.113.7"
+        receiver = invent_peer(ip)
         msg = node._new_msg(MsgType.PING, PingPayload())
-        await node._send(invent_peer(ip), msg)
+        
+        await node._send(receiver, msg)
         dest_ip, dest_port, data = await get_outbox(node)
+        
         assert dest_ip == ip
         assert dest_port == KADEMLIA_PORT
         assert KademliaMsg.from_bytes(data).msg_id == msg.msg_id
@@ -710,7 +713,7 @@ class TestKademliaNode:
     async def test_recv_loop_dispatches_valid_message(self, node: KademliaNode):
         async with recv_loop_running(node):
             req = make_msg(MsgType.PING, PingPayload())
-            await node.socket.inbox_queue.put(("203.0.113.5", req.to_bytes()))
+            await node.socket.inbox_queue.put(("203.0.113.5", EncryptedMsg(req.to_bytes())))
 
             _, _, reply = await get_reply(node)
             assert reply.msg_type is MsgType.PONG
@@ -719,10 +722,10 @@ class TestKademliaNode:
     async def test_recv_loop_drops_malformed_and_keeps_serving(self, node: KademliaNode):
         async with recv_loop_running(node):
             # Garbage first: it must be dropped without killing the loop.
-            await node.socket.inbox_queue.put(("203.0.113.5", b"not-valid-json"))
+            await node.socket.inbox_queue.put(("203.0.113.5", EncryptedMsg(b"not-valid-json")))
             # A valid request right after must still be answered.
             req = make_msg(MsgType.PING, PingPayload())
-            await node.socket.inbox_queue.put(item=("203.0.113.5", req.to_bytes()))
+            await node.socket.inbox_queue.put(("203.0.113.5", EncryptedMsg(req.to_bytes())))
 
             _, _, reply = await get_reply(node)
             assert reply.msg_type is MsgType.PONG
@@ -739,7 +742,7 @@ class TestKademliaNode:
         await node.run()
         try:
             req = make_msg(MsgType.PING, PingPayload())
-            await node.socket.inbox_queue.put(("203.0.113.5", req.to_bytes()))
+            await node.socket.inbox_queue.put(("203.0.113.5", EncryptedMsg(req.to_bytes())))
 
             _, _, reply = await get_reply(node)
             assert reply.msg_type is MsgType.PONG
@@ -793,7 +796,7 @@ class TestKademliaNode:
         value = os.urandom(64)
 
         # The value does reach b's DHT, but the ack never correlates back.
-        assert await a.store_req(a.peer, value) is True
+        assert await a.store_req(mock_peer("10.0.0.2", b.node_id), value) is True
         assert b.dht[hashlib.sha256(value).digest()] == value
 
     async def test_e2e_find_node_returns_peers_neighbors(self, network: FakeNetwork):
@@ -801,9 +804,9 @@ class TestKademliaNode:
         b = network.add_node("10.0.0.2", build_node())
         peer = mock_peer(ip="9.9.9.9")
         b.buckets.register_successful_contact(peer)
-        a.buckets.register_successful_contact(b.peer)
+        a.buckets.register_successful_contact(mock_peer("10.0.0.2", b.node_id))
 
-        result = await a._find_node_req(peer=b.peer, target=random_key())
+        result = await a._find_node_req(peer=mock_peer("10.0.0.2", b.node_id), target=random_key())
         assert result == [peer]
 
     async def test_e2e_find_value_hit_returns_value(self, network: FakeNetwork):
@@ -813,7 +816,7 @@ class TestKademliaNode:
         key = random_key()
         b.dht[key] = value
 
-        reply = await a._find_value_req(b.peer, key=key)
+        reply = await a._find_value_req(mock_peer("10.0.0.2", b.node_id), key=key)
         assert reply is not None
         assert reply.value == value
 
@@ -858,7 +861,7 @@ class TestNodeLookup:
 
     async def test_add_peers_excludes_own_node_id(self, node: KademliaNode):
         lookup = NodeLookup(node, TARGET)
-        lookup._add_peers([node.peer, create_peer_from_dist(7)])
+        lookup._add_peers([create_peer_from_dist(0), create_peer_from_dist(7)])
         assert node.node_id not in lookup.nearest
         assert peer_id_at(7) in lookup.nearest
 
@@ -891,9 +894,9 @@ class TestNodeLookup:
             "10.9.9.12": [],
         }
 
-        async def fake_find_node_req(ip, target, peer_id=None):
+        async def fake_find_node_req(target: KademliaKey, peer: Peer, timeout: float = 5.0):
             assert target == TARGET
-            return replies_by_ip.get(ip, [])
+            return replies_by_ip.get(peer.ip, [])
 
         node._find_node_req = AsyncMock(side_effect=fake_find_node_req)
 
@@ -909,14 +912,14 @@ class TestNodeLookup:
             "10.9.9.3": []
         }
 
-        async def fake_find_node_req(ip, target, peer_id=None):
-            return replies_by_ip.get(ip, [])
+        async def fake_find_node_req(target: KademliaKey, peer: Peer, timeout: float = 5.0):
+            return replies_by_ip.get(peer.ip, [])
 
         node._find_node_req = AsyncMock(side_effect=fake_find_node_req)
 
         await NodeLookup(node, TARGET).run()
 
-        queried = [call.args[0] for call in node._find_node_req.call_args_list]
+        queried = [call.args[1].ip for call in node._find_node_req.call_args_list]
         assert sorted(queried) == ["10.9.9.3", "10.9.9.50"]
 
     async def test_run_with_empty_routing_table_returns_empty(self, node: KademliaNode):
@@ -969,9 +972,9 @@ class TestValueLookup:
             "10.9.9.1": FindValueReplyPayload(value=b"the-value"),
         }
 
-        async def fake_find_value_req(dest_ip, peer_id, key):
+        async def fake_find_value_req(peer: Peer, key: KademliaKey, timeout: float = 5.0):
             assert key == TARGET
-            return replies_by_ip.get(dest_ip)
+            return replies_by_ip.get(peer.ip)
 
         node._find_value_req = AsyncMock(side_effect=fake_find_value_req)
 
@@ -987,8 +990,8 @@ class TestValueLookup:
             "10.9.9.4": FindValueReplyPayload(nodes=[create_peer_from_dist(100)]),
         }
 
-        async def fake_find_value_req(dest_ip, peer_id, key):
-            return replies_by_ip.get(dest_ip, FindValueReplyPayload(nodes=[]))
+        async def fake_find_value_req(peer: Peer, key: KademliaKey, timeout: float = 5.0):
+            return replies_by_ip.get(peer.ip, FindValueReplyPayload(nodes=[]))
 
         node._find_value_req = AsyncMock(side_effect=fake_find_value_req)
 

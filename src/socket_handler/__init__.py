@@ -3,11 +3,12 @@ import logging
 import struct
 from asyncio import Protocol, StreamReader, StreamWriter
 from closable import Closable
+from encryption import EncryptedMsg
 
 logger = logging.getLogger(__name__)
 
-type InboxData = tuple[str, bytes]
-type OutboxData = tuple[str, int, bytes]
+type InboxData = tuple[str, EncryptedMsg]
+type OutboxData = tuple[str, int, EncryptedMsg]
 
 
 class AnySocketHandler(Protocol):
@@ -23,8 +24,20 @@ class AnySocketHandler(Protocol):
 class SocketHandler(Closable, AnySocketHandler):
     def __init__(self) -> None:
         super().__init__()
+        self._ip: str | None = None
+        self._port: int | None = None
         self.inbox_queue = asyncio.Queue()
         self.outbox_queue = asyncio.Queue()
+        
+    @property
+    def ip(self) -> str: # type: ignore
+        assert self._ip is not None
+        return self.ip
+
+    @property
+    def port(self) -> str: # type: ignore
+        assert self._port is not None
+        return self.port
 
     async def _send_loop(self):
         while True:
@@ -67,7 +80,7 @@ class SocketHandler(Closable, AnySocketHandler):
         src_ip, src_port = writer.get_extra_info("peername")
         logger.debug("Connected with %s:%s", src_ip, src_port)
         try:
-            data = await self._read_message(reader)
+            data = EncryptedMsg(await self._read_message(reader))
             logger.debug("Received %d bytes from %s:%s", len(data), src_ip, src_port)
             await self.inbox_queue.put(
                 (
@@ -96,6 +109,8 @@ class SocketHandler(Closable, AnySocketHandler):
             port=port,
         )
         logger.info("Server listening on %s:%s", host, port)
+        self._ip = host
+        self._port = port
 
         self.bind_named_closable(self._send_loop.__name__, self._send_loop())
         self.bind_named_closable(self._serve.__name__, self._serve(server))
