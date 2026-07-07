@@ -60,7 +60,7 @@ async def main():
         assert len(others) == 1
         target_peer_id = (await database.User.by_id(others[0])).id
 
-        if not await kademlia.chat_msg_req(peer_id=target_peer_id, chat_id=chat_id, shared_secret=chat.secret, message=content, content_type=content_type):
+        if not await kademlia.chat_msg_req(peer_id=target_peer_id, chat_id=chat_id, shared_secret=chat.secret, message=content, content_type=content_type, timestamp=datetime.now(tz=timezone.utc)):
             raise RuntimeError(f"Message could not be sent in time")
 
 
@@ -95,14 +95,7 @@ async def main():
         else:
             prev_id = last_messages[0]
 
-        # TODO: This is broken because B64Bytes are only serialized when model_dump_json is used
-        msg_id = MessageID(kademlia_key(prev_id + json.dumps(
-            payload.model_dump(),
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True
-        ).encode("utf-8")))
+        msg_id = MessageID(kademlia_key(prev_id + payload.model_dump_json(ensure_ascii=False).encode("utf-8")))
 
         ts = datetime.now(tz=timezone.utc)  # TODO: we need the timestamp from the other user! When it was sent, not received
         # TODO: Deuplication! The same message may arrive twice => Message.create will fail
@@ -162,6 +155,7 @@ async def main():
             shared_secret=chat.secret,
             message=f"Chat Init from {kademlia.node_id}".encode("utf-8"),
             content_type="text/plain",
+            timestamp=datetime.now(tz=timezone.utc)
         )
         if not chat_init_success:
             await chat.delete()

@@ -17,7 +17,7 @@ from closable import Closable
 from config import Config
 from db.sqlite_impl import SqliteDatabase
 from handlers import HandlerBase
-from main import ContentType
+from kademlia.types import ContentType
 from models import *
 import shlex
 from aioitertools.helpers import maybe_await

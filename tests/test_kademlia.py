@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import os
 import asyncio
 import hashlib
@@ -130,7 +131,8 @@ def test_payload_type_must_match_msg_type():
                 chat_id=uuid4().bytes,
                 message=b"hello!",
                 shared_secret=os.urandom(32),
-                content_type="text/plain"
+                content_type="text/plain",
+                timestamp=datetime.now(tz=timezone.utc)
             )
         )
     ],
@@ -656,6 +658,7 @@ class TestKademliaNode:
                 shared_secret=os.urandom(32),
                 message=b"hello",
                 content_type="text/plain",
+                timestamp=datetime.now(tz=timezone.utc)
             ),
         )
         await node.handle_msg("203.0.113.5", req)
@@ -672,6 +675,7 @@ class TestKademliaNode:
                 shared_secret=os.urandom(32),
                 message=b"hello",
                 content_type="text/plain",
+                timestamp=datetime.now(tz=timezone.utc)
             ),
         )
         await node.handle_msg("203.0.113.5", req)
@@ -687,6 +691,7 @@ class TestKademliaNode:
                     shared_secret=os.urandom(32),
                     message=b"hello",
                     content_type="text/plain",
+                timestamp=datetime.now(tz=timezone.utc)
                 )
 
     def test_chat_msg_rejects_wrong_size_shared_secret(self):
@@ -698,6 +703,7 @@ class TestKademliaNode:
                     shared_secret=os.urandom(bad_len),
                     message=b"hello",
                     content_type="text/plain",
+                timestamp=datetime.now(tz=timezone.utc)
                 )
 
 

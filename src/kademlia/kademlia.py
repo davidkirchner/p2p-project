@@ -1,3 +1,4 @@
+from datetime import datetime
 import uuid, hashlib, logging, asyncio
 from dataclasses import dataclass
 from enum import Enum
@@ -106,6 +107,7 @@ class ChatMsgPayload(Payload):
     shared_secret: B64Bytes = Field(min_length=32, max_length=32) # 256 Bit
     message: B64Bytes
     content_type: ContentType
+    timestamp: datetime
 
 
 class ChatMsgReplyPayload(Payload):
@@ -558,7 +560,7 @@ class KademliaNode(Closable):
         await self._send(dest_ip, msg)
 
     async def chat_msg_req(self, peer_id: bytes, chat_id: bytes, shared_secret: bytes, message: bytes,
-                           content_type: ContentType, timeout: float = 5.0) -> bool:
+                           content_type: ContentType, timestamp: datetime, timeout: float = 5.0) -> bool:
         """
         Sends an application level CHAT MESSAGE. Returns 'True' if the recipient acknowledges it before timeout,
         'False' otherwise
@@ -571,7 +573,8 @@ class KademliaNode(Closable):
                 chat_id=chat_id,
                 shared_secret=shared_secret,
                 message=message,
-                content_type=content_type
+                content_type=content_type,
+                timestamp=timestamp
             ),
         )
 
