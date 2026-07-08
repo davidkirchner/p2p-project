@@ -160,7 +160,7 @@ class TestFromStored:
         user.private_identity = ue.private_bytes
         user.public_identity = ue.public_bytes
 
-        result = await PeerEncryption.from_stored(user)
+        result = PeerEncryption.from_stored(user)
         assert isinstance(result, UserEncryption)
         assert result.public_bytes == ue.public_bytes
 
@@ -172,7 +172,7 @@ class TestFromStored:
         user.private_identity = None
         user.public_identity = ue.public_bytes
 
-        result = await PeerEncryption.from_stored(user)
+        result = PeerEncryption.from_stored(user)
         assert isinstance(result, PeerEncryption)
         assert not isinstance(result, UserEncryption)
         assert result.public_bytes == ue.public_bytes

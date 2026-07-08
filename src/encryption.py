@@ -33,7 +33,7 @@ class PeerEncryption:
         )
 
     @classmethod
-    async def from_stored(cls, user: User) -> Union["PeerEncryption", "UserEncryption"]:
+    def from_stored(cls, user: User) -> Union["PeerEncryption", "UserEncryption"]:
         if user.private_identity:
             signing_key = SigningKey(user.private_identity)
             return UserEncryption(
