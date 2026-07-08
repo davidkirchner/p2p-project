@@ -1,73 +1,94 @@
+from dataclasses import dataclass, field
+from typing import NewType, Self, Union
 
+from nacl.signing import SigningKey, VerifyKey
+from nacl.public import SealedBox
 
-
-from dataclasses import dataclass
-from typing import Any, Callable, Self, Union
-
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
-from cryptography.hazmat.primitives import serialization
-
+from kademlia.types import KademliaKey
 from models import Storage, User, UserID
+
+
+Signature = NewType("Signature", bytes)
+EncryptedMsg = NewType("EncryptedMsg", bytes)
 
 
 @dataclass
 class PeerEncryption:
-    id: UserID
-    user: User
-    public_key: Ed25519PublicKey
+    id: KademliaKey
+    verify_key: VerifyKey
+    _public_sb: SealedBox = field(init=False)
+
+    def __post_init__(self):
+        self._public_sb = SealedBox(self.verify_key.to_curve25519_public_key())
+
+    @property
+    def public_bytes(self) -> bytes:
+        return bytes(self.verify_key)
 
     @classmethod
-    async def from_existing(cls, user: User) -> Union["PeerEncryption", "UserEncryption"]:
+    def from_peer(cls, id: KademliaKey, public_bytes: bytes) -> "PeerEncryption":
+        return cls(
+            id=id,
+            verify_key=VerifyKey(public_bytes)
+        )
+
+    @classmethod
+    def from_stored(cls, user: User) -> Union["PeerEncryption", "UserEncryption"]:
         if user.private_identity:
+            signing_key = SigningKey(user.private_identity)
             return UserEncryption(
                 id=user.id,
-                user=user,
-                private_key=Ed25519PrivateKey.from_private_bytes(user.private_identity),
-                public_key=Ed25519PublicKey.from_public_bytes(user.public_identity)
+                verify_key=VerifyKey(user.public_identity),
+                signing_key=signing_key
             )
         else:
             return PeerEncryption(
                 id=user.id,
-                user=user,
-                public_key=Ed25519PublicKey.from_public_bytes(user.public_identity)
+                verify_key=VerifyKey(user.public_identity)
             )
 
-    def verify(self, message: bytes, expected: bytes):
-        return self.public_key.verify(message, expected)
+    def verify(self, message: bytes, signature: Signature):
+        return self.verify_key.verify(message, signature)
+
+    def encrypt(self, receiver: "PeerEncryption", msg: bytes) -> EncryptedMsg:
+        return EncryptedMsg(receiver._public_sb.encrypt(msg))
 
 
 @dataclass
 class UserEncryption(PeerEncryption):
-    private_key: Ed25519PrivateKey
+    signing_key: SigningKey
+    _private_sb: SealedBox = field(init=False)
+
+    def __post_init__(self):
+        super().__post_init__()
+        self._private_sb = SealedBox(self.signing_key.to_curve25519_private_key())
+
+    @property
+    def private_bytes(self) -> bytes:
+        """Returns the 32-byte seed — sufficient to reconstruct both keys."""
+        return bytes(self.signing_key)
 
     @classmethod
-    async def create_new_user(cls, storage: Storage, name: str) -> Self:
-        private_key: Ed25519PrivateKey = Ed25519PrivateKey.generate()
-        public_key = private_key.public_key()
+    def create(cls) -> Self:
+        signing_key = SigningKey.generate()
+        verify_key = signing_key.verify_key
+        public_bytes = bytes(verify_key)
 
-        private_bytes: bytes = private_key.private_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PrivateFormat.Raw,
-            encryption_algorithm=serialization.NoEncryption(),  # or use BestAvailableEncryption(b"password")
-        )
-
-        # Serialize public key (share with peers)
-        public_bytes: bytes = public_key.public_bytes(
-            encoding=serialization.Encoding.Raw,
-            format=serialization.PublicFormat.Raw,
-        )
         from kademlia.kademlia import kademlia_key
-        id = kademlia_key(public_bytes)
-
-        user = await storage.User.create(id=id, name=name, public_identity=public_bytes, private_identity=private_bytes)
+        id = UserID(kademlia_key(public_bytes))
 
         return cls(
-            id=user.id,
-            user=user,
-            private_key=private_key,
-            public_key=public_key
+            id=id,
+            verify_key=verify_key,
+            signing_key=signing_key
         )
 
-    def sign(self, message: bytes) -> bytes:
-        assert self.private_key
-        return self.private_key.sign(message)
+    async def store_as_user(self, storage: Storage, name: str) -> User:
+        return await storage.User.create(self.id, name, self.public_bytes, self.private_bytes)
+
+    def sign(self, message: bytes) -> Signature:
+        return Signature(self.signing_key.sign(message).signature)
+
+    def decrypt(self, message: EncryptedMsg) -> bytes:
+        """Decrypt an encrypted message. Raises CryptoError if decryption fails."""
+        return self._private_sb.decrypt(message)

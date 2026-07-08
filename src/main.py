@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import secrets
 from uuid import uuid4
 import dotenv
@@ -7,8 +8,9 @@ import dotenv
 from datetime import datetime, timezone
 from typing import cast
 
-from encryption import UserEncryption
-from kademlia.kademlia import ChatMsgPayload, KademliaNode, PeerInfo, kademlia_key, Handler as KademliaHandler
+from encryption import EncryptedMsg, PeerEncryption, UserEncryption
+import encryption
+from kademlia.kademlia import ChatMsgPayload, KademliaNode, Peer, kademlia_key, Handler as KademliaHandler
 from kademlia.types import ContentType, KademliaKey
 from logging_setup import setup_logging
 from config import Config
@@ -26,6 +28,7 @@ async def main():
     # from the environment). Every module just does logging.getLogger(__name__).
 
     setup_logging()
+    logger = logging.getLogger(__name__)
 
     config = Config.from_env()
 
@@ -42,8 +45,8 @@ async def main():
 
         kademlia = KademliaNode(
             socket=socket,
-            node_id=kademlia_key(ue.user.public_identity),
-            pubkey=ue.user.public_identity,
+            node_id=ue.id,
+            pubkey=ue.public_bytes,
             encryption=ue,
             handler=KademliaHandler(
                 chat_msg_received
@@ -55,16 +58,58 @@ async def main():
         if not kademlia:
             return # TODO: This should not fail silently
 
+        # lets first get info about the other guy from the database.
         chat = await database.Chat.by_id(chat_id)
         others = [p for p in chat.participants if p != user_id]
         assert len(others) == 1
-        target_peer_id = (await database.User.by_id(others[0])).id
+        target_peer = await database.User.by_id(others[0])
 
-        if not await kademlia.chat_msg_req(peer_id=target_peer_id, chat_id=chat_id, shared_secret=chat.secret, message=content, content_type=content_type):
-            raise RuntimeError(f"Message could not be sent in time")
+        # now calculate the message contents (create a ChatMsgPayload instance)...
+        msg_payload = ChatMsgPayload(chat_id=chat_id, shared_secret=chat.secret, message=content, content_type=content_type, timestamp=datetime.now(tz=timezone.utc))
+        last_messages = await chat.messages(1)
+        prev_id = chat.secret if not last_messages else last_messages[0]
+        # and calculate the message ID.
+        # TODO: this is mostly duplicated logic from below. This stuff needs some major refactor at some point!
+        msg_id = MessageID(kademlia_key(prev_id + msg_payload.model_dump_json(ensure_ascii=False).encode("utf-8")))
+        
+        if await kademlia.chat_msg_req(peer_id=target_peer.id, chat_id=chat_id, shared_secret=chat.secret, message=content, content_type=content_type, timestamp=msg_payload.timestamp):
+            # message sent successfully, store in db and finish
+            await database.Message.create(
+                id=msg_id, 
+                chat=chat.id, 
+                sender=user_id, 
+                timestamp=msg_payload.timestamp, 
+                content=content, 
+                content_type=content_type
+            )
+            return
+        
+        # could not send the message directly (in time)
+        # in this case, we cache offline
+        # we first calculate the location like this
+        location_key = kademlia_key(msg_id + user_id)
+        target_peer_encr = PeerEncryption.from_stored(target_peer)
+        
+        # raw message contents to be cached
+        offline_store_bytes_raw = msg_payload.model_dump_json(ensure_ascii=False).encode("utf-8")
+        # sign that
+        offline_store_bytes_raw_signed = offline_store_bytes_raw + kademlia.encryption.sign(offline_store_bytes_raw)
+        if kademlia.encrypt:
+            # and then encrypt it for only the receiver (the other chat participant, not the cache location) to read
+            offline_store_bytes_encr = kademlia.encryption.encrypt(msg=offline_store_bytes_raw_signed, receiver=target_peer_encr)
+        else:
+            offline_store_bytes_encr = EncryptedMsg(offline_store_bytes_raw_signed)
+        
+        # then find all the neighbouring nodes to that location and ask them to store (please)
+        for offline_cache_peer in await kademlia.find_node(location_key):
+            if not await kademlia.store_req(offline_cache_peer, value=offline_store_bytes_encr):
+                logger.warning(f"Could not store message at location {offline_cache_peer.id} for some reason")
+            else:
+                logger.info(f"Cached message at location {offline_cache_peer.id}")
+        
+        # and now we're done. Waiting for them to pick up the message
 
-
-    async def chat_msg_received(sender: PeerInfo, payload: ChatMsgPayload):
+    async def chat_msg_received(sender: Peer, payload: ChatMsgPayload):
         sender_name = sender.ip
         sender_user = await database.User.register_peer(UserID(KademliaKey(sender.id)), sender.pubkey, sender_name)
 
@@ -88,32 +133,30 @@ async def main():
                 description=f"Chat between you and {sender_name}",
                 participants=[current_user, sender_user.id]
             )
-
+        
+        # we need to fetch this so we can calculate the message id
         last_messages = await target_chat.messages(1)
-        if not last_messages:
-            prev_id = target_chat.secret
-        else:
-            prev_id = last_messages[0]
-
-        # TODO: This is broken because B64Bytes are only serialized when model_dump_json is used
-        msg_id = MessageID(kademlia_key(prev_id + json.dumps(
-            payload.model_dump(),
-            ensure_ascii=False,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True
-        ).encode("utf-8")))
+        prev_id = target_chat.secret if not last_messages else last_messages[0]
+        msg_id = MessageID(kademlia_key(prev_id + payload.model_dump_json(ensure_ascii=False).encode("utf-8")))
 
         ts = datetime.now(tz=timezone.utc)  # TODO: we need the timestamp from the other user! When it was sent, not received
         # TODO: Deuplication! The same message may arrive twice => Message.create will fail
-        message = await database.Message.create(id=msg_id, chat=target_chat.id, sender=sender_user.id, timestamp=ts, content=payload.message, content_type=payload.content_type)
+        message = await database.Message.create(
+            id=msg_id, 
+            chat=target_chat.id, 
+            sender=sender_user.id, 
+            timestamp=ts, 
+            content=payload.message, 
+            content_type=payload.content_type
+        )
         await ui.received_message(message)
 
 
     async def create_user(name: str) -> User:
-        ue = await UserEncryption.create_new_user(storage=database, name=name)
+        ue = UserEncryption.create()
+        user = await ue.store_as_user(storage=database, name=name)
         await create_kademlia(ue)
-        return ue.user
+        return user
 
 
     async def selection_update(user: UserID | None, chat: ChatID | None):
@@ -122,7 +165,7 @@ async def main():
             if kademlia is not None and kademlia.node_id == user:
                 return # nothing to do here
 
-            ue = cast(UserEncryption, await UserEncryption.from_existing(await database.User.by_id(user)))
+            ue = cast(UserEncryption, UserEncryption.from_stored(await database.User.by_id(user)))
             await create_kademlia(ue)
         else:
             if kademlia is not None:
@@ -162,6 +205,7 @@ async def main():
             shared_secret=chat.secret,
             message=f"Chat Init from {kademlia.node_id}".encode("utf-8"),
             content_type="text/plain",
+            timestamp=datetime.now(tz=timezone.utc)
         )
         if not chat_init_success:
             await chat.delete()

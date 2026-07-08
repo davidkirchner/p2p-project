@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 import os
 import asyncio
 import hashlib
@@ -11,6 +12,7 @@ from unittest.mock import AsyncMock
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 
+from encryption import EncryptedMsg, PeerEncryption, UserEncryption
 from kademlia.kademlia import (
     Buckets,
     ID_SPACE,
@@ -31,8 +33,10 @@ from kademlia.kademlia import (
     ChatMsgPayload,
     ChatMsgReplyPayload,
     _Pending,
+    invent_peer,
 )
 from kademlia.lookup import NodeLookup, ValueLookup, ReplyOutcome
+from kademlia.types import KademliaKey
 from socket_handler import SocketHandler
 
 # The tests drive a node purely through the SocketHandler's two queues and never
@@ -49,6 +53,13 @@ pub_raw = pub.public_bytes(
     format=serialization.PublicFormat.Raw,
 )
 sender_id = hashlib.sha256(pub_raw).digest()
+
+def random_key() -> KademliaKey:
+    return KademliaKey(os.urandom(32))
+
+def mock_peer(ip: str, id: KademliaKey | None = None) -> Peer:
+    """Creates a non-functioning Peer out of thin air. DO NOT USE FOR ENCRYPTION, DOES NOT WORK! Only mock some values with this one."""
+    return Peer(id=id if id is not None else random_key(), ip=ip, pubkey=random_key())
 
 
 def make_msg(msg_type: MsgType, payload: Payload | dict, **overrides) -> KademliaMsg:
@@ -104,16 +115,16 @@ def test_payload_type_must_match_msg_type():
     [
         (MsgType.PING, PingPayload()),
         (MsgType.PONG, PongPayload()),
-        (MsgType.STORE, StorePayload(key=os.urandom(32), value=os.urandom(50))),
+        (MsgType.STORE, StorePayload(key=random_key(), value=os.urandom(50))),
         (MsgType.STORE_REPLY, StoreReplyPayload(success=True)),
-        (MsgType.FIND_NODE, FindNodePayload(target=os.urandom(32))),
+        (MsgType.FIND_NODE, FindNodePayload(target=random_key())),
         (
             MsgType.FIND_NODE_REPLY,
             FindNodeReplyPayload(
-                nodes=[Peer(id=os.urandom(32), ip="10.0.0.1")]
+                nodes=[mock_peer("10.0.0.1")]
             ),
         ),
-        (MsgType.FIND_VALUE, FindValuePayload(key=os.urandom(32))),
+        (MsgType.FIND_VALUE, FindValuePayload(key=random_key())),
         (
             MsgType.FIND_VALUE_REPLY,
             FindValueReplyPayload(value=os.urandom(80)),
@@ -121,7 +132,7 @@ def test_payload_type_must_match_msg_type():
         (
             MsgType.FIND_VALUE_REPLY,
             FindValueReplyPayload(
-                nodes=[Peer(id=os.urandom(32), ip="10.0.0.2")]
+                nodes=[mock_peer("10.0.0.2")]
             ),
         ),
         (
@@ -129,8 +140,9 @@ def test_payload_type_must_match_msg_type():
             ChatMsgPayload(
                 chat_id=uuid4().bytes,
                 message=b"hello!",
-                shared_secret=os.urandom(32),
-                content_type="text/plain"
+                shared_secret=random_key(),
+                content_type="text/plain",
+                timestamp=datetime.now(tz=timezone.utc)
             )
         )
     ],
@@ -152,24 +164,24 @@ def test_payload_roundtrip(msg_type: MsgType, payload: Payload):
 
 # create an all-zero node_id, so a peer's XOR distance to it is just the
 # integer value of its own id.
-NODE_ID = bytes(ID_SPACE // 8)  # 32 zero bytes
+NODE_ID = KademliaKey(bytes(ID_SPACE // 8))  # 32 zero bytes
 
 
-def peer_id_at(distance: int) -> bytes:
+def peer_id_at(distance: int) -> KademliaKey:
     """A peer id whose XOR distance to the all-zero NODE_ID is ``distance``."""
-    return distance.to_bytes(ID_SPACE // 8, "big")
+    return KademliaKey(distance.to_bytes(ID_SPACE // 8, "big"))
 
 
-def generate_contact_ids(bucket_index: int, count: int) -> list[bytes]:
+def generate_contact_ids(bucket_index: int, count: int) -> list[KademliaKey]:
     first_distance = 1 << bucket_index
     return [peer_id_at(first_distance + i) for i in range(count)]
 
 
-def make_buckets(k: int = 10) -> tuple[Buckets, list[tuple[bytes, str]]]:
+def make_buckets(k: int = 10) -> tuple[Buckets, list[tuple[KademliaKey, str]]]:
     """A Buckets instance plus the list its on_needs_ping callback appends to."""
-    pinged: list[tuple[bytes, str]] = []
-    def on_needs_ping(peer_id: bytes, dest_ip: str):
-        pinged.append((peer_id, dest_ip))
+    pinged: list[tuple[KademliaKey, str]] = []
+    def on_needs_ping(peer: Peer):
+        pinged.append((peer.id, peer.ip))
     return Buckets(NODE_ID, on_needs_ping, k=k), pinged
 
 
@@ -193,9 +205,9 @@ class TestBuckets:
 
     def test_successful_contact_adds_new_peer(self):
         buckets, _ = make_buckets()
-        peer_id = peer_id_at(5)
-        buckets.register_successful_contact(peer_id, "10.0.0.5")
-        assert buckets.get_peer(peer_id) == Peer(id=peer_id, ip="10.0.0.5")
+        peer = mock_peer("10.0.0.5", peer_id_at(5))
+        buckets.register_successful_contact(peer)
+        assert buckets.get_peer(peer.id) == peer
 
     def test_get_peer_returns_none_for_unknown(self):
         buckets, _ = make_buckets()
@@ -204,22 +216,22 @@ class TestBuckets:
     def test_successful_contact_for_known_peer_resets_failures(self):
         buckets, _ = make_buckets()
         peer_id = peer_id_at(5)
-        buckets.register_successful_contact(peer_id, "10.0.0.5")
+        buckets.register_successful_contact(mock_peer("10.0.0.5", peer_id))
         buckets.register_failure(peer_id)
         assert buckets._bucket_for(peer_id)[peer_id].fail_counter == 1
 
         # Seeing the peer again must clear its accumulated failures.
-        buckets.register_successful_contact(peer_id, "10.0.0.5")
+        buckets.register_successful_contact(mock_peer("10.0.0.5", peer_id))
         assert buckets._bucket_for(peer_id)[peer_id].fail_counter == 0
 
     def test_mark_alive_moves_peer_to_tail(self):
         buckets, _ = make_buckets()
         ids = generate_contact_ids(7, 3)
         for i, peer_id in enumerate(ids):
-            buckets.register_successful_contact(peer_id, f"10.0.0.{i}")
+            buckets.register_successful_contact(mock_peer(f"10.0.0.{i}", peer_id))
 
         # Touch the first-inserted peer; it should become the most-recent (tail).
-        buckets.register_successful_contact(ids[0], "10.0.0.0")
+        buckets.register_successful_contact(mock_peer("10.0.0.0", ids[0]))
         order = list(buckets._bucket_for(ids[0]).keys())
         assert order[-1] == ids[0]
         assert buckets._bucket_for(ids[0])[ids[0]].ip == "10.0.0.0"
@@ -229,10 +241,10 @@ class TestBuckets:
     def test_full_bucket_diverts_new_peer_to_cache(self):
         buckets, _ = make_buckets(k=2)
         a, b, c = generate_contact_ids(7, 3)
-        buckets.register_successful_contact(a, "10.0.0.1")
-        buckets.register_successful_contact(b, "10.0.0.2")
+        buckets.register_successful_contact(mock_peer("10.0.0.1", a))
+        buckets.register_successful_contact(mock_peer("10.0.0.2", b))
         # Bucket is now full (k=2); the third peer must not enter the bucket.
-        buckets.register_successful_contact(c, "10.0.0.3")
+        buckets.register_successful_contact(mock_peer("10.0.0.3", c))
         cache = buckets._cache_for(c)
 
         assert buckets.get_peer(c) is None
@@ -243,11 +255,11 @@ class TestBuckets:
         buckets, _ = make_buckets(k=2)
         a, b, c, d, e = generate_contact_ids(7, 5)
         # Fill the bucket, then overflow the cache (also size k=2).
-        buckets.register_successful_contact(a, "10.0.0.1")
-        buckets.register_successful_contact(b, "10.0.0.2")
-        buckets.register_successful_contact(c, "10.0.0.3")  # cached (oldest)
-        buckets.register_successful_contact(d, "10.0.0.4")  # cached
-        buckets.register_successful_contact(e, "10.0.0.5")  # evicts c
+        buckets.register_successful_contact(mock_peer("10.0.0.1", a))
+        buckets.register_successful_contact(mock_peer("10.0.0.2", b))
+        buckets.register_successful_contact(mock_peer("10.0.0.3", c))  # cached (oldest, c)
+        buckets.register_successful_contact(mock_peer("10.0.0.4", d))  # cache, d
+        buckets.register_successful_contact(mock_peer("10.0.0.5", e))  # evicts , e
 
         cache = buckets._cache_for(a)
         assert c not in cache
@@ -256,30 +268,30 @@ class TestBuckets:
     def test_recaching_known_candidate_refreshes_its_position(self):
         buckets, _ = make_buckets(k=2)
         a, b, c, d = generate_contact_ids(7, 4)
-        buckets.register_successful_contact(a, "10.0.0.1")
-        buckets.register_successful_contact(b, "10.0.0.2")
-        buckets.register_successful_contact(c, "10.0.0.3")  # cached (oldest)
-        buckets.register_successful_contact(d, "10.0.0.4")  # cached
+        buckets.register_successful_contact(mock_peer("10.0.0.1", a))
+        buckets.register_successful_contact(mock_peer("10.0.0.2", b))
+        buckets.register_successful_contact(mock_peer("10.0.0.3", c))  # cached (oldest, c)
+        buckets.register_successful_contact(mock_peer("10.0.0.4", d))  # cache, d
         # Re-seeing c moves it to the tail, so d is now the oldest.
-        buckets.register_successful_contact(c, "10.0.0.3")
+        buckets.register_successful_contact(mock_peer("10.0.0.3", c))
 
         assert list(buckets._cache_for(a)) == [d, c]
 
     def test_promoting_to_bucket_drops_stale_cache_entry(self):
         buckets, _ = make_buckets(k=2)
         a, b, c = generate_contact_ids(7, 3)
-        buckets.register_successful_contact(a, "10.0.0.1")
-        buckets.register_successful_contact(b, "10.0.0.2")
-        buckets.register_successful_contact(c, "10.0.0.3")  # cached
+        buckets.register_successful_contact(mock_peer("10.0.0.1", a))
+        buckets.register_successful_contact(mock_peer("10.0.0.2", b))
+        buckets.register_successful_contact(mock_peer("10.0.0.3", c))  # cache, c
         assert c in buckets._cache_for(c)
 
         # failure of peer in bucket
         for _ in range(buckets.failure_remove_threshold):
             buckets.register_failure(a)
 
-        buckets.register_successful_contact(c, "10.0.0.3")
+        buckets.register_successful_contact(mock_peer("10.0.0.3", c))
         # cached peer should have replaced failed peer
-        assert buckets.get_peer(c) == Peer(id=c, ip="10.0.0.3")
+        assert (t := buckets.get_peer(c)) is not None and t.id == c
         # and be removed from the cache
         assert c not in buckets._cache_for(c)
 
@@ -287,10 +299,10 @@ class TestBuckets:
         buckets, pings = make_buckets(k=2)
         a, b, c, d = generate_contact_ids(7, 4)
         bucket, cache = buckets.buckets[7], buckets.candidate_cache[7]
-        buckets.register_successful_contact(a, "10.0.0.1")
-        buckets.register_successful_contact(b, "10.0.0.2")
-        buckets.register_successful_contact(c, "10.0.0.3")  # cached (oldest)
-        buckets.register_successful_contact(d, "10.0.0.4")  # cached (will not answer ping on promotion)
+        buckets.register_successful_contact(mock_peer("10.0.0.1", a))
+        buckets.register_successful_contact(mock_peer("10.0.0.2", b))
+        buckets.register_successful_contact(mock_peer("10.0.0.3", c))  # cached (oldest, c)
+        buckets.register_successful_contact(mock_peer("10.0.0.4", d))  # cached (will not answer ping on promotion, d)
 
         # failure of peer in bucket
         for _ in range(buckets.failure_remove_threshold):
@@ -302,7 +314,7 @@ class TestBuckets:
         assert d not in bucket
 
         assert [p[1] for p in pings] == ["10.0.0.4", "10.0.0.3"]
-        buckets.register_successful_contact(c, "10.0.0.3")
+        buckets.register_successful_contact(mock_peer("10.0.0.3", c))
         assert c not in cache
         assert c in bucket
 
@@ -316,7 +328,7 @@ class TestBuckets:
     def test_peer_removed_after_threshold_failures(self):
         buckets, _ = make_buckets()
         peer_id = peer_id_at(5)
-        buckets.register_successful_contact(peer_id, "10.0.0.5")
+        buckets.register_successful_contact(mock_peer("10.0.0.5", peer_id))
         # peer survives the failures if failures < threshold
         for _ in range(buckets.failure_remove_threshold - 1):
             buckets.register_failure(peer_id)
@@ -328,9 +340,9 @@ class TestBuckets:
     def test_eviction_pings_waiting_candidate(self):
         buckets, pinged = make_buckets(k=2)
         a, b, c = generate_contact_ids(7, 3)
-        buckets.register_successful_contact(a, "10.0.0.1")
-        buckets.register_successful_contact(b, "10.0.0.2")
-        buckets.register_successful_contact(c, "10.0.0.3")  # cached candidate
+        buckets.register_successful_contact(mock_peer("10.0.0.1", a))
+        buckets.register_successful_contact(mock_peer("10.0.0.2", b))
+        buckets.register_successful_contact(mock_peer("10.0.0.3", c))  # cached candidat, c)
 
         for _ in range(buckets.failure_remove_threshold):
             buckets.register_failure(a)  # remove a, freeing a slot
@@ -342,7 +354,7 @@ class TestBuckets:
     def test_eviction_without_candidate_pings_nothing(self):
         buckets, pinged = make_buckets()
         peer_id = peer_id_at(5)
-        buckets.register_successful_contact(peer_id, "10.0.0.5")
+        buckets.register_successful_contact(mock_peer("10.0.0.5", peer_id))
         for _ in range(buckets.failure_remove_threshold):
             buckets.register_failure(peer_id)
         assert pinged == []
@@ -356,7 +368,7 @@ class TestBuckets:
     def test_knn_sorted_by_xor_distance_to_target(self):
         buckets, _ = make_buckets()
         for d in (5, 3, 9, 1, 7):
-            buckets.register_successful_contact(peer_id_at(d), f"10.0.0.{d}")
+            buckets.register_successful_contact(mock_peer(f"10.0.0.{d}", peer_id_at(d)))
 
         # Target all-zeros: distance == id
         nearest = buckets.get_k_nearest_neighbors(NODE_ID)
@@ -365,10 +377,10 @@ class TestBuckets:
     def test_knn_caps_at_k(self):
         buckets, _ = make_buckets(k=3)
         for i, peer_id in enumerate(generate_contact_ids(7, 2)):
-            buckets.register_successful_contact(peer_id, f"10.0.7.{i}")
+            buckets.register_successful_contact(mock_peer(f"10.0.7.{i}", peer_id))
         # A couple of peers in another bucket too, to span buckets.
         for i, peer_id in enumerate(generate_contact_ids(20, 2)):
-            buckets.register_successful_contact(peer_id, f"10.0.20.{i}")
+            buckets.register_successful_contact(mock_peer(f"10.0.20.{i}", peer_id))
 
         neighbors = buckets.get_k_nearest_neighbors(NODE_ID)
         assert len(neighbors) == 3
@@ -383,26 +395,13 @@ class TestBuckets:
 # A node only touches the network through its SocketHandler's two queues, so the
 # tests feed its inbox and read its outbox instead of using real sockets
 
-class _Signer:
-    """Minimal stand-in for UserEncryption: KademliaNode only calls .sign()."""
 
-    def __init__(self, private_key: Ed25519PrivateKey) -> None:
-        self._private_key = private_key
-
-    def sign(self, message: bytes) -> bytes:
-        return self._private_key.sign(message)
-
-
-def new_identity() -> tuple[bytes, bytes, _Signer]:
+def new_identity() -> tuple[KademliaKey, bytes, UserEncryption]:
     """A fresh (node_id, pubkey, signer) triple with node_id == sha256(pubkey).
 
     """
-    private_key = Ed25519PrivateKey.generate()
-    pubkey = private_key.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    )
-    return hashlib.sha256(pubkey).digest(), pubkey, _Signer(private_key)
+    enc = UserEncryption.create()
+    return enc.id, enc.public_bytes, enc
 
 
 def build_node(*, port: int = KADEMLIA_PORT) -> KademliaNode:
@@ -412,9 +411,8 @@ def build_node(*, port: int = KADEMLIA_PORT) -> KademliaNode:
     loop in __init__).
     """
     node_id, pubkey, signer = new_identity()
-    encryption: Any = signer  # KademliaNode only needs .sign(); see _Signer
     from kademlia.kademlia import Handler as KademliaHandler
-    return KademliaNode(SocketHandler(), node_id, pubkey, encryption, port=port, handler=KademliaHandler())
+    return KademliaNode(SocketHandler(), node_id, pubkey, signer, port=port, handler=KademliaHandler(), encrypt=False)
 
 
 async def get_outbox(node: KademliaNode, timeout: float = 1.0):
@@ -505,10 +503,14 @@ class TestKademliaNode:
         # The node's own listen port must not leak into the destination port:
         # messages always go to the network-wide KADEMLIA_PORT.
         node = build_node(port=1234)
+        ip = "203.0.113.7"
+        receiver = invent_peer(ip)
         msg = node._new_msg(MsgType.PING, PingPayload())
-        await node._send("203.0.113.7", msg)
+        
+        await node._send(receiver, msg)
         dest_ip, dest_port, data = await get_outbox(node)
-        assert dest_ip == "203.0.113.7"
+        
+        assert dest_ip == ip
         assert dest_port == KADEMLIA_PORT
         assert KademliaMsg.from_bytes(data).msg_id == msg.msg_id
 
@@ -517,13 +519,13 @@ class TestKademliaNode:
     async def test_request_times_out_and_cleans_up_pending(self, node: KademliaNode):
         msg = node._new_msg(MsgType.PING, PingPayload())
         with pytest.raises(asyncio.TimeoutError):
-            await node.request(dest_ip="198.51.100.1", msg=msg, timeout=0.01)
+            await node.request(peer=invent_peer("198.51.100.1"), msg=msg, timeout=0.01)
         # The outstanding-request registration must be gone after a timeout.
-        assert msg.msg_id not in node._pending
+        assert msg.msg_id not in node._pending_by_msg_id
 
     async def test_ping_returns_false_on_timeout(self, node: KademliaNode):
-        peer_id = os.urandom(32)
-        node.buckets.register_successful_contact(peer_id, "198.51.100.1")
+        peer_id = random_key()
+        node.buckets.register_successful_contact(mock_peer("198.51.100.1", peer_id))
         assert await node.ping(peer_id, timeout=0.01) is False
 
     # ---- handle_msg: reply correlation rules --------------------------------
@@ -537,7 +539,7 @@ class TestKademliaNode:
     async def test_reply_from_wrong_ip_does_not_resolve(self, node: KademliaNode):
         fut = node.loop.create_future()
         req_id = uuid4().bytes
-        node._pending[req_id] = _Pending(fut, "10.0.0.9", MsgType.PONG)
+        node._pending_by_msg_id[req_id] = _Pending(fut, "10.0.0.9", MsgType.PONG)
 
         reply = make_msg(MsgType.PONG, PongPayload(), in_reply_to=req_id)
         await node.handle_msg("10.0.0.99", reply)  # right msg_id, wrong peer
@@ -547,7 +549,7 @@ class TestKademliaNode:
     async def test_reply_with_wrong_type_does_not_resolve(self, node: KademliaNode):
         fut = node.loop.create_future()
         req_id = uuid4().bytes
-        node._pending[req_id] = _Pending(fut, "10.0.0.9", MsgType.PONG)
+        node._pending_by_msg_id[req_id] = _Pending(fut, "10.0.0.9", MsgType.PONG)
 
         # Right peer & msg_id, but a FIND_NODE_REPLY where a PONG was expected.
         reply = make_msg(
@@ -560,7 +562,7 @@ class TestKademliaNode:
     async def test_matching_reply_resolves_pending(self, node: KademliaNode):
         fut = node.loop.create_future()
         req_id = uuid4().bytes
-        node._pending[req_id] = _Pending(fut, "10.0.0.9", MsgType.PONG)
+        node._pending_by_msg_id[req_id] = _Pending(fut, "10.0.0.9", MsgType.PONG)
 
         reply = make_msg(MsgType.PONG, PongPayload(), in_reply_to=req_id)
         await node.handle_msg("10.0.0.9", reply)
@@ -602,9 +604,9 @@ class TestKademliaNode:
         assert reply.in_reply_to == req.msg_id
 
     async def test_find_node_request_returns_known_peers(self, node: KademliaNode):
-        peer = Peer(id=os.urandom(32), ip="9.9.9.9")
-        node.buckets.register_successful_contact(peer.id, peer.ip)
-        req = make_msg(MsgType.FIND_NODE, FindNodePayload(target=os.urandom(32)))
+        peer = mock_peer("9.9.9.9")
+        node.buckets.register_successful_contact(peer)
+        req = make_msg(MsgType.FIND_NODE, FindNodePayload(target=random_key()))
 
         await node.handle_msg("203.0.113.5", req)
 
@@ -616,7 +618,7 @@ class TestKademliaNode:
 
     async def test_find_value_hit_returns_value(self, node: KademliaNode):
         value = os.urandom(20)
-        key = os.urandom(32)
+        key = random_key()
         node.dht[key] = value
         req = make_msg(MsgType.FIND_VALUE, FindValuePayload(key=key))
 
@@ -630,9 +632,9 @@ class TestKademliaNode:
         assert reply.payload.nodes == []
 
     async def test_find_value_miss_returns_neighbors(self, node: KademliaNode):
-        peer = Peer(id=os.urandom(32), ip="9.9.9.9")
-        node.buckets.register_successful_contact(peer.id, peer.ip)
-        req = make_msg(MsgType.FIND_VALUE, FindValuePayload(key=os.urandom(32)))
+        peer = mock_peer("9.9.9.9")
+        node.buckets.register_successful_contact(peer)
+        req = make_msg(MsgType.FIND_VALUE, FindValuePayload(key=random_key()))
 
         await node.handle_msg("203.0.113.5", req)
 
@@ -643,7 +645,7 @@ class TestKademliaNode:
         assert reply.payload.nodes == [peer]
 
     async def test_find_value_miss_reply_is_correlatable(self, node: KademliaNode):
-        req = make_msg(MsgType.FIND_VALUE, FindValuePayload(key=os.urandom(32)))
+        req = make_msg(MsgType.FIND_VALUE, FindValuePayload(key=random_key()))
         await node.handle_msg("203.0.113.5", req)
         _, _, reply = await get_reply(node)
         assert reply.in_reply_to == req.msg_id
@@ -653,9 +655,10 @@ class TestKademliaNode:
             MsgType.CHAT_MSG,
             ChatMsgPayload(
                 chat_id=uuid4().bytes,
-                shared_secret=os.urandom(32),
+                shared_secret=random_key(),
                 message=b"hello",
                 content_type="text/plain",
+                timestamp=datetime.now(tz=timezone.utc)
             ),
         )
         await node.handle_msg("203.0.113.5", req)
@@ -669,9 +672,10 @@ class TestKademliaNode:
             MsgType.CHAT_MSG,
             ChatMsgPayload(
                 chat_id=uuid4().bytes,
-                shared_secret=os.urandom(32),
+                shared_secret=random_key(),
                 message=b"hello",
                 content_type="text/plain",
+                timestamp=datetime.now(tz=timezone.utc)
             ),
         )
         await node.handle_msg("203.0.113.5", req)
@@ -684,9 +688,10 @@ class TestKademliaNode:
             with pytest.raises(ValueError):
                 ChatMsgPayload(
                     chat_id=os.urandom(bad_len),
-                    shared_secret=os.urandom(32),
+                    shared_secret=random_key(),
                     message=b"hello",
                     content_type="text/plain",
+                timestamp=datetime.now(tz=timezone.utc)
                 )
 
     def test_chat_msg_rejects_wrong_size_shared_secret(self):
@@ -694,10 +699,11 @@ class TestKademliaNode:
         for bad_len in (0, 16, 31, 33):
             with pytest.raises(ValueError):
                 ChatMsgPayload(
-                    chat_id=os.urandom(32),
+                    chat_id=random_key(),
                     shared_secret=os.urandom(bad_len),
                     message=b"hello",
                     content_type="text/plain",
+                timestamp=datetime.now(tz=timezone.utc)
                 )
 
 
@@ -707,7 +713,7 @@ class TestKademliaNode:
     async def test_recv_loop_dispatches_valid_message(self, node: KademliaNode):
         async with recv_loop_running(node):
             req = make_msg(MsgType.PING, PingPayload())
-            await node.socket.inbox_queue.put(("203.0.113.5", req.to_bytes()))
+            await node.socket.inbox_queue.put(("203.0.113.5", EncryptedMsg(req.to_bytes())))
 
             _, _, reply = await get_reply(node)
             assert reply.msg_type is MsgType.PONG
@@ -716,10 +722,10 @@ class TestKademliaNode:
     async def test_recv_loop_drops_malformed_and_keeps_serving(self, node: KademliaNode):
         async with recv_loop_running(node):
             # Garbage first: it must be dropped without killing the loop.
-            await node.socket.inbox_queue.put(("203.0.113.5", b"not-valid-json"))
+            await node.socket.inbox_queue.put(("203.0.113.5", EncryptedMsg(b"not-valid-json")))
             # A valid request right after must still be answered.
             req = make_msg(MsgType.PING, PingPayload())
-            await node.socket.inbox_queue.put(item=("203.0.113.5", req.to_bytes()))
+            await node.socket.inbox_queue.put(("203.0.113.5", EncryptedMsg(req.to_bytes())))
 
             _, _, reply = await get_reply(node)
             assert reply.msg_type is MsgType.PONG
@@ -736,7 +742,7 @@ class TestKademliaNode:
         await node.run()
         try:
             req = make_msg(MsgType.PING, PingPayload())
-            await node.socket.inbox_queue.put(("203.0.113.5", req.to_bytes()))
+            await node.socket.inbox_queue.put(("203.0.113.5", EncryptedMsg(req.to_bytes())))
 
             _, _, reply = await get_reply(node)
             assert reply.msg_type is MsgType.PONG
@@ -760,14 +766,14 @@ class TestKademliaNode:
     async def test_e2e_ping_succeeds(self, network: FakeNetwork):
         a = network.add_node("10.0.0.1", build_node())
         b = network.add_node("10.0.0.2", build_node())
-        a.buckets.register_successful_contact(b.node_id, "10.0.0.2")
+        a.buckets.register_successful_contact(mock_peer("10.0.0.2", b.node_id))
         assert await a.ping(b.node_id) is True
 
     async def test_e2e_ping_unknown_host_times_out(self, network: FakeNetwork):
         a = network.add_node("10.0.0.1", build_node())
-        peer_id = os.urandom(32)
+        peer_id = random_key()
         # Nobody at this address -> no PONG -> timeout -> False.
-        a.buckets.register_successful_contact(peer_id, "10.0.0.250")
+        a.buckets.register_successful_contact(mock_peer("10.0.0.250", peer_id))
         assert await a.ping(peer_id, timeout=0.05) is False
 
     async def test_e2e_store_replicates_to_peer(self, network: FakeNetwork):
@@ -776,9 +782,9 @@ class TestKademliaNode:
 
         async def _resolve(target: bytes) -> Peer:
             if target == a.node_id:
-                return Peer(id=a.node_id, ip="10.0.0.1")
+                return mock_peer(id=a.node_id, ip="10.0.0.1")
             if target == b.node_id:
-                return Peer(id=b.node_id, ip="10.0.0.2")
+                return mock_peer(id=b.node_id, ip="10.0.0.2")
             raise ValueError
 
         mocked_resolve_peer = AsyncMock()
@@ -790,27 +796,27 @@ class TestKademliaNode:
         value = os.urandom(64)
 
         # The value does reach b's DHT, but the ack never correlates back.
-        assert await a.store_req(b.node_id, value) is True
+        assert await a.store_req(mock_peer("10.0.0.2", b.node_id), value) is True
         assert b.dht[hashlib.sha256(value).digest()] == value
 
     async def test_e2e_find_node_returns_peers_neighbors(self, network: FakeNetwork):
         a = network.add_node("10.0.0.1", build_node())
         b = network.add_node("10.0.0.2", build_node())
-        peer = Peer(id=os.urandom(32), ip="9.9.9.9")
-        b.buckets.register_successful_contact(peer.id, peer.ip)
-        a.buckets.register_successful_contact(b.node_id, "10.0.0.2")
+        peer = mock_peer(ip="9.9.9.9")
+        b.buckets.register_successful_contact(peer)
+        a.buckets.register_successful_contact(mock_peer("10.0.0.2", b.node_id))
 
-        result = await a._find_node_req("10.0.0.2", target=os.urandom(32))
+        result = await a._find_node_req(peer=mock_peer("10.0.0.2", b.node_id), target=random_key())
         assert result == [peer]
 
     async def test_e2e_find_value_hit_returns_value(self, network: FakeNetwork):
         a = network.add_node("10.0.0.1", build_node())
         b = network.add_node("10.0.0.2", build_node())
         value = os.urandom(30)
-        key = os.urandom(32)
+        key = random_key()
         b.dht[key] = value
 
-        reply = await a._find_value_req( "10.0.0.2", b.node_id, key=key)
+        reply = await a._find_value_req(mock_peer("10.0.0.2", b.node_id), key=key)
         assert reply is not None
         assert reply.value == value
 
@@ -824,14 +830,14 @@ TARGET = NODE_ID  # all zeros; distance-to-target == int value of a peer id
 
 def create_peer_from_dist(distance: int) -> Peer:
     """A Peer at a known XOR distance from TARGET, with a matching ip."""
-    return Peer(id=peer_id_at(distance), ip=f"10.9.9.{distance}")
+    return mock_peer(id=peer_id_at(distance), ip=f"10.9.9.{distance}")
 
 
 def seed(node: KademliaNode, *distances: int) -> None:
     """Put peers at the given distances into the node's routing table."""
     for d in distances:
         p = create_peer_from_dist(d)
-        node.buckets.register_successful_contact(p.id, p.ip)
+        node.buckets.register_successful_contact(p)
 
 
 def distances_of(peers: list[Peer]) -> list[int]:
@@ -855,8 +861,7 @@ class TestNodeLookup:
 
     async def test_add_peers_excludes_own_node_id(self, node: KademliaNode):
         lookup = NodeLookup(node, TARGET)
-        own = Peer(id=node.node_id, ip="10.0.0.1")
-        lookup._add_peers([own, create_peer_from_dist(7)])
+        lookup._add_peers([create_peer_from_dist(0), create_peer_from_dist(7)])
         assert node.node_id not in lookup.nearest
         assert peer_id_at(7) in lookup.nearest
 
@@ -889,9 +894,9 @@ class TestNodeLookup:
             "10.9.9.12": [],
         }
 
-        async def fake_find_node_req(ip, target, peer_id=None):
+        async def fake_find_node_req(target: KademliaKey, peer: Peer, timeout: float = 5.0):
             assert target == TARGET
-            return replies_by_ip.get(ip, [])
+            return replies_by_ip.get(peer.ip, [])
 
         node._find_node_req = AsyncMock(side_effect=fake_find_node_req)
 
@@ -907,14 +912,14 @@ class TestNodeLookup:
             "10.9.9.3": []
         }
 
-        async def fake_find_node_req(ip, target, peer_id=None):
-            return replies_by_ip.get(ip, [])
+        async def fake_find_node_req(target: KademliaKey, peer: Peer, timeout: float = 5.0):
+            return replies_by_ip.get(peer.ip, [])
 
         node._find_node_req = AsyncMock(side_effect=fake_find_node_req)
 
         await NodeLookup(node, TARGET).run()
 
-        queried = [call.args[0] for call in node._find_node_req.call_args_list]
+        queried = [call.args[1].ip for call in node._find_node_req.call_args_list]
         assert sorted(queried) == ["10.9.9.3", "10.9.9.50"]
 
     async def test_run_with_empty_routing_table_returns_empty(self, node: KademliaNode):
@@ -967,9 +972,9 @@ class TestValueLookup:
             "10.9.9.1": FindValueReplyPayload(value=b"the-value"),
         }
 
-        async def fake_find_value_req(dest_ip, peer_id, key):
+        async def fake_find_value_req(peer: Peer, key: KademliaKey, timeout: float = 5.0):
             assert key == TARGET
-            return replies_by_ip.get(dest_ip)
+            return replies_by_ip.get(peer.ip)
 
         node._find_value_req = AsyncMock(side_effect=fake_find_value_req)
 
@@ -985,10 +990,12 @@ class TestValueLookup:
             "10.9.9.4": FindValueReplyPayload(nodes=[create_peer_from_dist(100)]),
         }
 
-        async def fake_find_value_req(dest_ip, peer_id, key):
-            return replies_by_ip.get(dest_ip, FindValueReplyPayload(nodes=[]))
+        async def fake_find_value_req(peer: Peer, key: KademliaKey, timeout: float = 5.0):
+            return replies_by_ip.get(peer.ip, FindValueReplyPayload(nodes=[]))
 
         node._find_value_req = AsyncMock(side_effect=fake_find_value_req)
 
         with pytest.raises(ValueError):
             await ValueLookup(node, TARGET).run()
+            
+            

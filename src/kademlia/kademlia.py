@@ -1,9 +1,12 @@
+from datetime import datetime
+from functools import lru_cache
 import uuid, hashlib, logging, asyncio
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Self
+from nacl.exceptions import CryptoError
 from pydantic import BaseModel, Field, SerializeAsAny, model_validator
-from encryption import UserEncryption
+from encryption import EncryptedMsg, PeerEncryption, Signature, UserEncryption
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.exceptions import InvalidSignature
 from closable import Closable
@@ -38,25 +41,16 @@ class MsgType(str, Enum):
 
 
 class Peer(BaseModel):
-    id: B64Bytes
+    id: KademliaKey
     ip: str
-
-
-class PeerInfo(Peer):
-    """Static metadata about a peer"""
     pubkey: B64Bytes
+    
+def invent_peer(ip: str) -> Peer:
+    enc = UserEncryption.create()
+    return Peer(id=enc.id, ip=ip, pubkey=enc.public_bytes)
 
 
-BOOTSTRAP_PEERS = [
-    Peer(
-        id=bytes.fromhex("1111111111111111111111111111111111111111111111111111111111111111"),
-        ip="127.0.0.1",
-    ),
-    Peer(
-        id=bytes.fromhex("2222222222222222222222222222222222222222222222222222222222222222"),
-        ip="127.0.0.2",
-    ),
-]
+BOOTSTRAP_PEERS = [invent_peer("127.0.0.1"), invent_peer("127.0.0.2")]
 
 BOOTSTRAP_LOOKUPS = 5
 
@@ -84,7 +78,7 @@ class StoreReplyPayload(Payload):
 
 
 class FindNodePayload(Payload):
-    target: B64Bytes  # node ID being searched for
+    target: KademliaKey  # node ID being searched for
 
 
 class FindNodeReplyPayload(Payload):
@@ -92,7 +86,7 @@ class FindNodeReplyPayload(Payload):
 
 
 class FindValuePayload(Payload):
-    key: B64Bytes
+    key: KademliaKey
 
 
 class FindValueReplyPayload(Payload):
@@ -106,6 +100,7 @@ class ChatMsgPayload(Payload):
     shared_secret: B64Bytes = Field(min_length=32, max_length=32) # 256 Bit
     message: B64Bytes
     content_type: ContentType
+    timestamp: datetime
 
 
 class ChatMsgReplyPayload(Payload):
@@ -136,10 +131,13 @@ REPLY_TYPES: dict[MsgType, MsgType] = {
 }
 
 
+type MsgId = B64Bytes
+
+
 class KademliaMsg(BaseModel):
     msg_type: MsgType
-    msg_id: B64Bytes = Field(default_factory=lambda: uuid.uuid4().bytes)
-    in_reply_to: B64Bytes | None = None # reference the msg_id of the request
+    msg_id: MsgId = Field(default_factory=lambda: uuid.uuid4().bytes)
+    in_reply_to: MsgId | None = None # reference the msg_id of the request
     sender_id: B64Bytes      # node ID = sha256(pubkey)
     sender_pubkey: B64Bytes  # raw public key
     signature: B64Bytes
@@ -175,8 +173,9 @@ class KademliaMsg(BaseModel):
         return self
 
     def verify_signature(self) -> None:
-        public_key = Ed25519PublicKey.from_public_bytes(self.sender_pubkey)
+        enc = PeerEncryption.from_peer(id=KademliaKey(self.sender_id), public_bytes=self.sender_pubkey)
 
+        # get the signature of the message, but it has to be made without the signature itself, so extract that first
         signature = self.signature
         try:
             self.signature = b""
@@ -184,10 +183,8 @@ class KademliaMsg(BaseModel):
         finally:
             self.signature = signature
 
-        try:
-            public_key.verify(signature, data)
-        except InvalidSignature:
-            raise ValueError("Invalid signature")
+        # then verify (raises on error)
+        enc.verify(signature=Signature(signature), message=data)
 
     def to_bytes(self) -> bytes:
         return self.model_dump_json().encode("utf-8")
@@ -202,33 +199,39 @@ def byte_xor(a: bytes, b: bytes) -> bytes:
 
 @dataclass
 class Contact:
-    ip: str
+    peer: Peer
     fail_counter: int = 0
+    
+    @property
+    def ip(self):
+        return self.peer.ip
 
-type OnNeedsPing = Callable[[bytes, str], None]
+type OnNeedsPing = Callable[[Peer], None]
+
+type Bucket = dict[KademliaKey, Contact]
 
 class Buckets:
-    def __init__(self, node_id: bytes, on_needs_ping: OnNeedsPing, k=10) -> None:
+    def __init__(self, node_id: KademliaKey, on_needs_ping: OnNeedsPing, k=10) -> None:
         self.node_id = node_id
         self.on_needs_ping = on_needs_ping
         self.k = k
         self.failure_remove_threshold = 3
-        self.buckets: dict[int, dict[bytes, Contact]] = {}
-        self.candidate_cache: dict[int, dict[bytes, Contact]] = {}
+        self.buckets: dict[int, Bucket] = {}
+        self.candidate_cache: dict[int, Bucket] = {}
         for i in range(ID_SPACE):
             self.buckets[i] = {}
             self.candidate_cache[i] = {}
 
-    def _determine_bucket(self, peer_id: bytes) -> int:
+    def _determine_bucket(self, peer_id: KademliaKey) -> int:
         distance = int.from_bytes(byte_xor(self.node_id, peer_id))
         if distance == 0:
             raise ValueError(f"Peer-id {peer_id!r} is identical to this node's ID")
         return distance.bit_length() - 1
 
-    def _bucket_for(self, peer_id: bytes) -> dict[bytes, Contact]:
+    def _bucket_for(self, peer_id: KademliaKey) -> Bucket:
         return self.buckets[self._determine_bucket(peer_id)]
 
-    def _cache_for(self, peer_id: bytes) -> dict[bytes, Contact]:
+    def _cache_for(self, peer_id: KademliaKey) -> Bucket:
         return self.candidate_cache[self._determine_bucket(peer_id)]
 
     def _remove_oldest_dict_entry(self, d: dict) -> None:
@@ -240,25 +243,25 @@ class Buckets:
         '''Raises KeyError when key does not exist'''
         d[key] = d.pop(key)
 
-    def _all_entries_in_buckets(self) -> list[tuple[bytes, Contact]]:
+    def _all_entries_in_buckets(self):
         return [e for bucket in self.buckets.values() for e in bucket.items()]
 
-    def _add_peer(self, peer_id: bytes, peer_ip: str) -> None:
-        bucket = self._bucket_for(peer_id)
+    def _add_peer(self, peer: Peer) -> None:
+        bucket = self._bucket_for(peer.id)
         if len(bucket) >= self.k:
-            raise RuntimeError(f"Bucket for peer {peer_id!r} reached maximum entries")
-        bucket[peer_id] = Contact(ip=peer_ip)
+            raise RuntimeError(f"Bucket for peer {peer.id!r} reached maximum entries")
+        bucket[peer.id] = Contact(peer)
 
-    def _cache_peer(self, peer_id: bytes, peer_ip: str) -> None:
-        cache = self._cache_for(peer_id)
-        if peer_id in cache:
-            self._move_dict_entry_to_tail(cache, peer_id)
+    def _cache_peer(self, peer: Peer) -> None:
+        cache = self._cache_for(peer.id)
+        if peer.id in cache:
+            self._move_dict_entry_to_tail(cache, peer.id)
             return
         if len(cache) >= self.k:
             self._remove_oldest_dict_entry(cache)
-        cache[peer_id] = Contact(ip=peer_ip)
+        cache[peer.id] = Contact(peer)
 
-    def _mark_alive(self, peer_id: bytes) -> None:
+    def _mark_alive(self, peer_id: KademliaKey) -> None:
         bucket = self._bucket_for(peer_id)
         try:
             self._move_dict_entry_to_tail(bucket, peer_id)
@@ -271,9 +274,9 @@ class Buckets:
         if not cache:
             return
         next_candidate_id = next(reversed(cache))
-        self.on_needs_ping(next_candidate_id, cache[next_candidate_id].ip)
+        self.on_needs_ping(cache[next_candidate_id].peer)
 
-    def register_failure(self, peer_id: bytes) -> None:
+    def register_failure(self, peer_id: KademliaKey) -> None:
         bucket = self._bucket_for(peer_id)
         cache = self._cache_for(peer_id)
         bucket_id = self._determine_bucket(peer_id)
@@ -290,30 +293,31 @@ class Buckets:
                 bucket.pop(peer_id)
                 self._ping_next_candidate(bucket_id)
 
-    def register_successful_contact(self, peer_id: bytes, peer_ip: str):
+    def register_successful_contact(self, peer: Peer):
+        peer_id = peer.id
         bucket = self._bucket_for(peer_id)
 
         if peer_id in bucket:
             self._mark_alive(peer_id)
         elif len(bucket) < self.k:
-            self._add_peer(peer_id, peer_ip)
+            self._add_peer(peer)
             # remove peer from cache in case it was cached before
             self._cache_for(peer_id).pop(peer_id, None)
         else:
-            self._cache_peer(peer_id, peer_ip)
+            self._cache_peer(peer)
 
-    def get_k_nearest_neighbors(self, target_id: bytes) -> list[Peer]:
+    def get_k_nearest_neighbors(self, target_id: KademliaKey) -> list[Peer]:
         def by_distance(item: tuple[bytes, Contact]):
             return byte_xor(item[0], target_id)
 
         k_neighbors = sorted(self._all_entries_in_buckets(), key=by_distance)[:self.k]
-        return [Peer(id=n[0], ip=n[1].ip) for n in k_neighbors]
+        return [c.peer for _, c in k_neighbors]
 
-    def get_peer(self, peer_id: bytes) -> Peer | None:
+    def get_peer(self, peer_id: KademliaKey) -> Peer | None:
         bucket = self._bucket_for(peer_id)
         if peer_id not in bucket:
             return None
-        return Peer(id=peer_id, ip=bucket[peer_id].ip)
+        return bucket[peer_id].peer
 
 
 @dataclass
@@ -325,7 +329,7 @@ class _Pending:
 
 
 class Handler(HandlerBase):
-    async def chat_msg_received(self, sender: PeerInfo, payload: ChatMsgPayload):
+    async def chat_msg_received(self, sender: Peer, payload: ChatMsgPayload):
         pass
 
 
@@ -335,7 +339,7 @@ class KademliaNode(Closable):
     populates k-Buckets when started.
     """
 
-    def __init__(self, socket: AnySocketHandler, node_id: bytes, pubkey: bytes, encryption: UserEncryption, handler: Handler, port: int = KADEMLIA_PORT) -> None:
+    def __init__(self, socket: AnySocketHandler, node_id: KademliaKey, pubkey: bytes, encryption: UserEncryption, handler: Handler, port: int = KADEMLIA_PORT, encrypt: bool = True) -> None:
         super().__init__()
         self.socket = socket
         self.node_id = node_id
@@ -346,10 +350,15 @@ class KademliaNode(Closable):
         self.loop = asyncio.get_running_loop()
         self.dht: dict[bytes, Any] = {} # TODO: store this in a more appropriate way
         self.handler = handler
+        self.encrypt = encrypt
         # Outstanding requests awaiting a reply, keyed by the request's msg_id.
-        self._pending: dict[bytes, _Pending] = {}
+        self._pending_by_msg_id: dict[MsgId, _Pending] = {}
+        
+    @property
+    def peer(self) -> Peer:
+        return Peer(id=self.node_id, ip=self.socket.ip, pubkey=self.encryption.public_bytes)
 
-    async def resolve_peer(self, target: bytes) -> Peer:
+    async def resolve_peer(self, target: KademliaKey) -> Peer:
         if target == self.node_id:
             raise ValueError("Cannot resolve own node ID")
         if peer := self.buckets.get_peer(target):
@@ -365,7 +374,7 @@ class KademliaNode(Closable):
         for peer in BOOTSTRAP_PEERS:
             if peer.id == self.node_id:
                 continue
-            self.buckets.register_successful_contact(peer.id,peer.ip)
+            self.buckets.register_successful_contact(peer)
         #Lookup own id
         await self.find_node(self.node_id)
         #Repeat N times
@@ -373,7 +382,7 @@ class KademliaNode(Closable):
             # Generate random id
             random_node = secrets.token_bytes(32)
             #Lookup random id
-            await self.find_node(random_node)
+            await self.find_node(KademliaKey(random_node))
 
     def get_location_key(self, current_chat_hash: bytes) -> bytes:
         combined = self.node_id + current_chat_hash
@@ -389,7 +398,7 @@ class KademliaNode(Closable):
 
     # ---- message plumbing ----------------------------------------------------
 
-    def _new_msg(self, msg_type: MsgType, payload: Payload, in_reply_to: bytes | None = None) -> KademliaMsg:
+    def _new_msg(self, msg_type: MsgType, payload: Payload, in_reply_to: MsgId | None = None) -> KademliaMsg:
         """Wrap a payload into a KademliaMsg signed with our identity."""
         msg = KademliaMsg(
             msg_type=msg_type,
@@ -403,64 +412,68 @@ class KademliaNode(Closable):
         msg.signature = self.encryption.sign(msg.to_bytes())
         return msg
 
-    async def _send(self, dest_ip: str, msg: KademliaMsg) -> None:
+    async def _send(self, dest: Peer, msg: KademliaMsg) -> None:
         """Fire-and-forget primitive: hand a message to the socket outbox."""
-        await self.socket.outbox_queue.put((dest_ip, KADEMLIA_PORT, msg.to_bytes()))
+        msg_bytes = msg.to_bytes()
+        if self.encrypt:
+            encr = PeerEncryption.from_peer(id=KademliaKey(dest.id), public_bytes=dest.pubkey)
+            msg_bytes_encr = self.encryption.encrypt(msg=msg_bytes, receiver=encr) 
+        else:
+            msg_bytes_encr = EncryptedMsg(msg_bytes)
+        await self.socket.outbox_queue.put((dest.ip, KADEMLIA_PORT, msg_bytes_encr))
 
-    async def request(self, *, msg: KademliaMsg, dest_ip: str | None = None, peer_id: bytes | None = None, timeout: float = 5.0) -> KademliaMsg:
+    async def request(self, *, msg: KademliaMsg, peer: Peer | KademliaKey, timeout: float = 5.0) -> KademliaMsg:
         """
         Send `msg` and wait for the reply (in_reply_tp == msg.msg_id).
         Raises `asyncio.TimeoutError` if no reply comes within `timeout` seconds.
         Provide `peer_id` when possible so timeouts can be registered in `Buckets`
         (so offline/ unresponsive peers can be removed from Buckets)
         """
-        if dest_ip is None and peer_id is None:
-            raise ValueError(f"Provide dest_ip or peer_id or both when calling {self.request.__name__}")
-        if dest_ip is None:
-            assert peer_id
-            dest_ip = (await self.resolve_peer(peer_id)).ip
+        if isinstance(peer, bytes):
+            peer = await self.resolve_peer(peer)
 
         fut: asyncio.Future[KademliaMsg] = self.loop.create_future()
-        self._pending[msg.msg_id] = _Pending(fut, dest_ip, REPLY_TYPES[msg.msg_type])
+        self._pending_by_msg_id[msg.msg_id] = _Pending(fut, peer.ip, REPLY_TYPES[msg.msg_type])
         try:
-            await self._send(dest_ip, msg)
+            await self._send(peer, msg)
             return await asyncio.wait_for(fut, timeout)
         except TimeoutError as e:
-            if peer_id is not None:
-                self.buckets.register_failure(peer_id)
+            self.buckets.register_failure(peer.id)
             raise e
         finally:
             # Always drop the registration, also on timeout/cancellation.
-            self._pending.pop(msg.msg_id, None)
+            self._pending_by_msg_id.pop(msg.msg_id, None)
 
     # ---- RPCs ----------------------------------------------------------------
 
-    async def ping(self, peer_id: bytes, timeout: float = 5.0) -> bool:
+    async def ping(self, peer_id: KademliaKey, timeout: float = 5.0) -> bool:
         """Send a PING and wait for the PONG. True if it arrives in time."""
         msg = self._new_msg(MsgType.PING, PingPayload())
         try:
-            await self.request(msg=msg, peer_id=peer_id, timeout=timeout)
+            await self.request(msg=msg, peer=peer_id, timeout=timeout)
             return True
         except (asyncio.TimeoutError, RuntimeError):
             return False
 
-    async def get_peer_infos(self, peer_id: bytes, timeout: float = 5.0) -> PeerInfo:
+    async def get_peer_infos(self, peer_id: KademliaKey, timeout: float = 5.0) -> Peer:
         """
+        Returns the most up-to-date info about a peer (by contacting directly)
         Raises `asyncio.TimeoutError` if the peer does not answer in time.
         Raises `RuntimeError` if the responder's identity differs from `peer_id`.
         """
         peer = await self.resolve_peer(peer_id)
         msg = self._new_msg(MsgType.PING, PingPayload())
-        reply = await self.request(msg=msg, dest_ip=peer.ip, peer_id=peer_id, timeout=timeout)
+        reply = await self.request(msg=msg, peer=peer, timeout=timeout)
         if reply.sender_id != peer_id:
             raise RuntimeError("Response's sender identity does not match the requested peer ID")
-        return PeerInfo(id=reply.sender_id, ip=peer.ip, pubkey=reply.sender_pubkey)
+        
+        return Peer(id=KademliaKey(reply.sender_id), ip=peer.ip, pubkey=reply.sender_pubkey)
 
-    async def _pong(self, dest_ip: str, in_reply_to: bytes) -> None:
+    async def _pong(self, peer: Peer, in_reply_to: MsgId) -> None:
         """Fire-and-forget reply to a PING."""
-        await self._send(dest_ip, self._new_msg(MsgType.PONG, PongPayload(), in_reply_to=in_reply_to))
+        await self._send(peer, self._new_msg(MsgType.PONG, PongPayload(), in_reply_to))
 
-    def _ping_with_buckets_side_effect(self, peer_id: bytes, dest_ip: str) -> None:
+    def _ping_with_buckets_side_effect(self, peer: Peer) -> None:
         """
         Sync ping callback for Buckets. Will be called for peers that may not be in
         a bucket yet, but IP is known. Calls `request` with both peer_id and dest_ip so `request`
@@ -468,15 +481,15 @@ class KademliaNode(Closable):
         """
         async def _ping():
             msg = self._new_msg(MsgType.PING, PingPayload())
-            await self.request(msg=msg, peer_id=peer_id, dest_ip=dest_ip)
+            await self.request(msg=msg, peer=peer)
 
         self.bind_closable(_ping())
 
-    async def find_node(self, target: bytes) -> list[Peer]:
+    async def find_node(self, target: KademliaKey) -> list[Peer]:
         from .lookup import NodeLookup
         return await NodeLookup(self, target).run()
 
-    async def _find_node_req(self, dest_ip: str, target: bytes, timeout: float = 5.0, peer_id: bytes | None = None) -> list[Peer] | None:
+    async def _find_node_req(self, target: KademliaKey, peer: Peer, timeout: float = 5.0) -> list[Peer] | None:
         """
         Send a FIND_NODE request and wait for the reply. Returns `list[Peer]` if reply
         arrives on time, `None` otherwise.
@@ -487,13 +500,13 @@ class KademliaNode(Closable):
             payload=FindNodePayload(target=target),
         )
         try:
-            reply = await self.request(dest_ip=dest_ip, peer_id=peer_id, msg=msg, timeout=timeout)
+            reply = await self.request(peer=peer, msg=msg, timeout=timeout)
         except asyncio.TimeoutError:
             return None
         assert isinstance(reply.payload, FindNodeReplyPayload)
         return reply.payload.nodes
 
-    async def _find_node_reply(self, dest_ip: str, in_reply_to: bytes, target: bytes) -> None:
+    async def _find_node_reply(self, peer: Peer, in_reply_to: MsgId, target: KademliaKey) -> None:
         """Fire-and-foreget reply to FIND_NODE"""
         msg = self._new_msg(
             msg_type=MsgType.FIND_NODE_REPLY,
@@ -502,14 +515,14 @@ class KademliaNode(Closable):
             ),
             in_reply_to=in_reply_to
         )
-        await self._send(dest_ip, msg)
+        await self._send(peer, msg)
 
-    async def find_value(self, key: bytes) -> bytes | list[Peer]:
+    async def find_value(self, key: KademliaKey) -> bytes:
         from .lookup import ValueLookup
         return await ValueLookup(self, key).run()
 
 
-    async def _find_value_req(self, dest_ip: str, peer_id: bytes, key: bytes, timeout: float = 5.0) -> None | FindValueReplyPayload:
+    async def _find_value_req(self, peer: Peer, key: KademliaKey, timeout: float = 5.0) -> None | FindValueReplyPayload:
         """
         Send a FIND_VALUE request. Returns `None` on timeout, `FindValueReplyPayload` otherwise.
         """
@@ -518,13 +531,13 @@ class KademliaNode(Closable):
             payload=FindValuePayload(key=key),
         )
         try:
-            reply = await self.request(dest_ip=dest_ip, peer_id=peer_id, msg=msg, timeout=timeout)
+            reply = await self.request(peer=peer, msg=msg, timeout=timeout)
         except asyncio.TimeoutError:
             return None
         assert isinstance(reply.payload, FindValueReplyPayload)
         return reply.payload
 
-    async def _find_value_reply(self, dest_ip: str, in_reply_to: bytes, value: bytes | None = None, neighbors: list[Peer] | None = None) -> None:
+    async def _find_value_reply(self, peer: Peer, in_reply_to: MsgId, value: bytes | None = None, neighbors: list[Peer] | None = None) -> None:
         """Fire-and-forget reply to FIND_VALUE"""
         if value is None and neighbors is None:
             raise ValueError("Either value or neighbors must be given as an argument.")
@@ -539,37 +552,36 @@ class KademliaNode(Closable):
             payload=payload,
             in_reply_to=in_reply_to
         )
-        await self._send(dest_ip, msg)
+        await self._send(peer, msg)
 
-    async def store_req(self, peer_id: bytes, value: bytes, timeout: float = 5.0) -> bool:
+    async def store_req(self, peer: Peer, value: bytes, timeout: float = 5.0) -> bool:
         """
         Send a STORE request. Returns `False` on timeout or failure,
         returns `True` on success.
         """
-        peer = await self.resolve_peer(peer_id)
         key = hashlib.sha256(value).digest()
         msg = self._new_msg(
             msg_type=MsgType.STORE,
             payload=StorePayload(key=key, value=value)
         )
         try:
-            reply = await self.request(dest_ip=peer.ip, msg=msg, timeout=timeout)
+            reply = await self.request(peer=peer, msg=msg, timeout=timeout)
         except asyncio.TimeoutError:
             return False
         assert isinstance(reply.payload, StoreReplyPayload)
         return reply.payload.success
 
-    async def _store_reply(self, dest_ip: str, in_reply_to: bytes, success: bool) -> None:
+    async def _store_reply(self, peer: Peer, in_reply_to: MsgId, success: bool) -> None:
         """Fire-and-forget reply to STORE"""
         msg = self._new_msg(
             msg_type=MsgType.STORE_REPLY,
             payload=StoreReplyPayload(success=success),
             in_reply_to=in_reply_to
         )
-        await self._send(dest_ip, msg)
+        await self._send(peer, msg)
 
-    async def chat_msg_req(self, peer_id: bytes, chat_id: bytes, shared_secret: bytes, message: bytes,
-                           content_type: ContentType, timeout: float = 5.0) -> bool:
+    async def chat_msg_req(self, peer_id: KademliaKey, chat_id: bytes, shared_secret: bytes, message: bytes,
+                           content_type: ContentType, timestamp: datetime, timeout: float = 5.0) -> bool:
         """
         Sends an application level CHAT MESSAGE. Returns 'True' if the recipient acknowledges it before timeout,
         'False' otherwise
@@ -582,19 +594,20 @@ class KademliaNode(Closable):
                 chat_id=chat_id,
                 shared_secret=shared_secret,
                 message=message,
-                content_type=content_type
+                content_type=content_type,
+                timestamp=timestamp
             ),
         )
 
         try:
-            reply = await self.request(dest_ip=peer.ip, msg=msg, timeout=timeout)
+            reply = await self.request(peer=peer, msg=msg, timeout=timeout)
         except asyncio.TimeoutError:
             return False
 
         assert isinstance(reply.payload, ChatMsgReplyPayload)
         return reply.payload.success
 
-    async def _chat_msg_reply(self, dest_ip: str, in_reply_to: bytes, success: bool) -> None :
+    async def _chat_msg_reply(self, peer: Peer, in_reply_to: MsgId, success: bool) -> None :
         """
         Fire-and-forget reply to CHAT_MSG
         """
@@ -603,14 +616,15 @@ class KademliaNode(Closable):
             payload=ChatMsgReplyPayload(success = success),
             in_reply_to = in_reply_to
         )
-        await self._send(dest_ip,msg)
+        await self._send(peer, msg)
 
 
 
     def _is_valid_reply(self, sender_ip: str, msg: KademliaMsg) -> bool:
         if not msg.in_reply_to:
             return False
-        pending = self._pending.get(msg.in_reply_to)
+        
+        pending = self._pending_by_msg_id.get(msg.in_reply_to)
         if pending is None:
             # No one is waiting: late, duplicate, or unwanted reply.
             return False
@@ -630,23 +644,25 @@ class KademliaNode(Closable):
 
     async def handle_msg(self, sender_ip: str, msg: KademliaMsg):
         # Replies are correlated back to whoever is awaiting their request.
+        peer = Peer(id=KademliaKey(msg.sender_id), ip=sender_ip, pubkey=msg.sender_pubkey)
+        
         if msg.in_reply_to is not None:
             if not self._is_valid_reply(sender_ip, msg):
                 return
-            pending = self._pending.get(msg.in_reply_to)
+            pending = self._pending_by_msg_id.get(msg.in_reply_to)
             assert pending # _is_valid_reply ensures pending is not None
             if not pending.future.done():
                 pending.future.set_result(msg)
-            self.buckets.register_successful_contact(msg.sender_id, sender_ip)
+            self.buckets.register_successful_contact(peer)
             return
 
         # Requests:
         if msg.msg_type is MsgType.PING:
-            await self._pong(dest_ip=sender_ip, in_reply_to=msg.msg_id)
+            await self._pong(peer=peer, in_reply_to=msg.msg_id)
         elif msg.msg_type is MsgType.FIND_NODE:
             assert isinstance(msg.payload, FindNodePayload)
             await self._find_node_reply(
-                dest_ip=sender_ip,
+                peer=peer,
                 in_reply_to=msg.msg_id,
                 target=msg.payload.target
             )
@@ -654,7 +670,7 @@ class KademliaNode(Closable):
             assert isinstance(msg.payload, StorePayload)
             self.dht[msg.payload.key] = msg.payload.value
             await self._store_reply(
-                dest_ip=sender_ip,
+                peer=peer,
                 in_reply_to=msg.msg_id,
                 success=True
             )
@@ -663,14 +679,14 @@ class KademliaNode(Closable):
             # value exists in local dht => send the value
             if msg.payload.key in self.dht:
                 await self._find_value_reply(
-                    dest_ip=sender_ip,
+                    peer=peer,
                     in_reply_to=msg.msg_id,
                     value=self.dht[msg.payload.key]
                 )
             # value doesn't exist in local dht => send k-nearest neigbors
             else:
                 await self._find_value_reply(
-                    dest_ip=sender_ip,
+                    peer=peer,
                     in_reply_to=msg.msg_id,
                     neighbors=self.buckets.get_k_nearest_neighbors(msg.payload.key)
                 )
@@ -682,7 +698,6 @@ class KademliaNode(Closable):
                 sender_ip,
                 msg.payload.message
             )
-            peer = PeerInfo(id=msg.sender_id, ip=sender_ip, pubkey=msg.sender_pubkey)
             try:
                 await self.handler.chat_msg_received(
                     sender=peer,
@@ -694,7 +709,7 @@ class KademliaNode(Closable):
                 success = True
 
             await self._chat_msg_reply(
-                dest_ip=sender_ip,
+                peer=peer,
                 in_reply_to=msg.msg_id,
                 success=success
             )
@@ -703,21 +718,30 @@ class KademliaNode(Closable):
         else:
             logger.debug(f"Received message with unknown msg_type: {msg}")
             return
-        self.buckets.register_successful_contact(msg.sender_id, sender_ip)
+        self.buckets.register_successful_contact(peer)
 
 
     async def recv_loop(self):
         while True:
-            sender_ip, raw_msg = await self.socket.inbox_queue.get()
+            sender_ip, raw_msg_encr = await self.socket.inbox_queue.get()
+            
             try:
+                raw_msg = self.encryption.decrypt(raw_msg_encr) if self.encrypt else raw_msg_encr
                 parsed = KademliaMsg.from_bytes(raw_msg)
                 parsed.verify_signature()
             except ValueError as e:
                 # Malformed / unverifiable message (bad JSON,
                 # payload/type mismatch, ...). Drop it and keep serving.
-                logger.warning("Discarding invalid message from %s: %s", sender_ip, e)
+                logger.warning(f"Discarding invalid message from {sender_ip}", exc_info=e)
                 continue
-            logger.debug("Received %s from %s", parsed.msg_type.value, sender_ip)
+            except CryptoError as e:
+                logger.warning(f"Decryption error for message from {sender_ip}", exc_info=e)
+                continue
+            except InvalidSignature as e:
+                logger.warning(f"Message from {sender_ip} has invalid signature", exc_info=e)
+                continue
+            
+            logger.debug(f"Received {parsed.msg_type.value} from {sender_ip}")
             await self.handle_msg(sender_ip, parsed)
 
     async def run(self):
