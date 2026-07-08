@@ -375,6 +375,17 @@ class KademliaNode(Closable):
             #Lookup random id
             await self.find_node(random_node)
 
+    def get_location_key(self, current_chat_hash: bytes) -> bytes:
+        combined = self.node_id + current_chat_hash
+        location_key = hashlib.sha256(combined).digest()
+        return location_key
+
+    def decrypt_cached_message(self,message: bytes) -> bytes| None:
+        return message # TODO: implement decryption of cached messages
+
+    async def retrieve_cached_message(self, chat: Chat) -> KademliaMsg | None:
+        pass
+
 
     # ---- message plumbing ----------------------------------------------------
 

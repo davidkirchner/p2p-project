@@ -225,6 +225,14 @@ class SqliteDatabase(m.Storage):
                     (self.id, before.isoformat(), n)
                 ).fetchall()
                 return [m.MessageID(r[0]) for r in rows]
+            
+            async def get_current_chat_hash(self) -> bytes:
+                latest_messages = await self.messages(1)
+                
+                if not latest_messages:
+                    raise ValueError(f"No messages found for chat {self.id}")
+                
+                return latest_messages[0]
 
             def __repr__(self) -> str:
                 return f"Chat(id={self.id!r}, title={self.title!r})"
