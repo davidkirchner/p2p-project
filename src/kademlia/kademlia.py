@@ -423,7 +423,22 @@ class KademliaNode(Closable):
         cached_msg.payload.message = plaintext
 
         return cached_msg
+    
+    async def retrieve_cached_messages(self, chat: Chat) -> list[KademliaMsg]:
+        cached_messages = []
 
+        while True:
+            cached_msg = await self.retrieve_cached_message(chat)
+
+            if cached_msg is None:
+                break
+
+            cached_messages.append(cached_msg)
+
+            # TODO:
+            # Store the retrieved message in the database (or pass it to the handler).
+
+        return cached_messages
 
     # ---- message plumbing ----------------------------------------------------
 
