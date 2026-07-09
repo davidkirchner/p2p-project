@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Self
 from nacl.exceptions import CryptoError
+import models as m
 from pydantic import BaseModel, Field, SerializeAsAny, model_validator
 from encryption import EncryptedMsg, PeerEncryption, Signature, UserEncryption
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -395,7 +396,7 @@ class KademliaNode(Closable):
         except CryptoError:
             return None
 
-    async def retrieve_cached_message(self, chat: Chat) -> KademliaMsg | None:
+    async def retrieve_cached_message(self, chat: m.Chat) -> KademliaMsg | None:
         current_chat_hash = await chat.get_current_chat_hash()
 
         location_key= self.get_location_key(current_chat_hash)
@@ -418,7 +419,7 @@ class KademliaNode(Closable):
 
         return cached_msg
     
-    async def retrieve_cached_messages(self, chat: Chat) -> list[KademliaMsg]:
+    async def retrieve_cached_messages(self, chat: m.Chat) -> list[KademliaMsg]:
         cached_messages = []
 
         while True:
