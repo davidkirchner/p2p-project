@@ -333,6 +333,9 @@ class Handler(HandlerBase):
     async def chat_msg_received(self, sender: Peer, payload: ChatMsgPayload):
         pass
 
+    async def cached_chat_msg_received(self,sender_id: KademliaKey,sender_pubkey: bytes,payload: ChatMsgPayload,):
+        pass
+
 
 class KademliaNode(Closable):
     """Provides Kademlia logic and RPCs. Communicates via SocketHandler
@@ -409,6 +412,7 @@ class KademliaNode(Closable):
             return None
         
         cached_msg = KademliaMsg.from_bytes(cached_bytes)
+        cached_msg.verify_signature()
         plaintext = self.decrypt_cached_message(cached_msg.payload.message)
 
         if plaintext is None:
@@ -420,18 +424,24 @@ class KademliaNode(Closable):
         return cached_msg
     
     async def retrieve_cached_messages(self, chat: m.Chat) -> list[KademliaMsg]:
-        cached_messages = []
+        cached_messages: list[KademliaMsg] = []
 
         while True:
+            old_hash = await chat.get_current_chat_hash()
             cached_msg = await self.retrieve_cached_message(chat)
 
             if cached_msg is None:
                 break
 
             cached_messages.append(cached_msg)
+            await self.handler.cached_chat_msg_received(sender_id=KademliaKey(cached_msg.sender_id),
+                                                    sender_pubkey=cached_msg.sender_pubkey,
+                                                    payload=cached_msg.payload,)
+            new_hash = await chat.get_current_chat_hash()
 
-            # TODO:
-            # Store the retrieved message in the database (or pass it to the handler).
+            if new_hash == old_hash:
+                # No new messages were added during the processing of the cached message, so we can stop retrieving.
+                break
 
         return cached_messages
 

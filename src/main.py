@@ -49,7 +49,8 @@ async def main():
             pubkey=ue.public_bytes,
             encryption=ue,
             handler=KademliaHandler(
-                chat_msg_received
+                chat_msg_received,
+                cached_chat_msg_received
             )
         )
         await kademlia.run()
@@ -151,6 +152,36 @@ async def main():
         )
         await ui.received_message(message)
 
+    async def cached_chat_msg_received(
+        sender_id: KademliaKey,
+        sender_pubkey: bytes,
+        payload: ChatMsgPayload
+    ):
+        assert kademlia
+
+        chat = await database.Chat.by_id(ChatID(payload.chat_id))
+
+        current_user = UserID(KademliaKey(kademlia.node_id))
+
+        # Find the other chat participant
+        sender_user_id = next(
+            participant
+            for participant in chat.participants
+            if participant != current_user
+        )
+
+        sender_user = await database.User.by_id(sender_user_id)
+
+        peer = Peer(
+            id=KademliaKey(sender_user.id),
+            ip=sender_user.name,
+            pubkey=sender_pubkey,
+        )
+
+        await chat_msg_received(
+            sender=peer,
+            payload=payload,
+        )
 
     async def create_user(name: str) -> User:
         ue = UserEncryption.create()
