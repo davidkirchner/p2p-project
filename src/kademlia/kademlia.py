@@ -396,10 +396,8 @@ class KademliaNode(Closable):
             return None
 
     async def retrieve_cached_message(self, chat: Chat) -> KademliaMsg | None:
-        #Get the current chat hash
         current_chat_hash = await chat.get_current_chat_hash()
 
-        #Get the location key
         location_key= self.get_location_key(current_chat_hash)
 
         #Retrieve the cached message from the DHT
@@ -409,17 +407,13 @@ class KademliaNode(Closable):
             #No cached message found
             return None
         
-        #Deserealize the cached message
         cached_msg = KademliaMsg.from_bytes(cached_bytes)
-
-        #Decryption
         plaintext = self.decrypt_cached_message(cached_msg.payload.message)
 
         if plaintext is None:
             #Decryption failed
             return None
         
-        #Replace the message in the payload with the decrypted plaintext
         cached_msg.payload.message = plaintext
 
         return cached_msg
