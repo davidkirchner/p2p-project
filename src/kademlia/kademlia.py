@@ -388,10 +388,8 @@ class KademliaNode(Closable):
             #Lookup random id
             await self.find_node(KademliaKey(random_node))
 
-    def get_location_key(self, current_chat_hash: bytes) -> bytes:
-        combined = self.node_id + current_chat_hash
-        location_key = hashlib.sha256(combined).digest()
-        return location_key
+    def get_location_key(self, current_chat_hash: bytes, sender_id: bytes) -> KademliaKey:
+        return kademlia_key(current_chat_hash + sender_id)
 
     def decrypt_cached_message(self,message: bytes) -> bytes| None:
         try:
@@ -402,7 +400,13 @@ class KademliaNode(Closable):
     async def retrieve_cached_message(self, chat: m.Chat) -> KademliaMsg | None:
         current_chat_hash = await chat.get_current_chat_hash()
 
-        location_key= self.get_location_key(current_chat_hash)
+        # The sender caches a message at hash(chat_hash + sender_id) (their own id),
+        # so to find it we use the other participant's id, not our own.
+        others = [p for p in chat.participants if p != self.node_id]
+        assert len(others) == 1
+        sender_id = others[0]
+
+        location_key = self.get_location_key(current_chat_hash, sender_id)
 
         #Retrieve the cached message from the DHT
         try:
@@ -411,14 +415,19 @@ class KademliaNode(Closable):
             #No cached message found
             return None
 
-        cached_msg = KademliaMsg.from_bytes(cached_bytes)
-        cached_msg.verify_signature()
-        plaintext = self.decrypt_cached_message(cached_msg.payload.message)
-
+        plaintext = self.decrypt_cached_message(cached_bytes)
         if plaintext is None:
-            #Decryption failed
             return None
 
+        try:
+            cached_msg = KademliaMsg.from_bytes(plaintext)
+            cached_msg.verify_signature()
+            if not cached_msg.msg_type == MsgType.CHAT_MSG:
+                raise ValueError(f"Retrieved a cached message, but message type is not CHAT_MSG. {cached_msg}")
+        except (ValueError, InvalidSignature):
+            return None
+
+        assert isinstance(cached_msg.payload, ChatMsgPayload)
         cached_msg.payload.message = plaintext
 
         return cached_msg
@@ -433,6 +442,7 @@ class KademliaNode(Closable):
             if cached_msg is None:
                 break
 
+            assert isinstance(cached_msg.payload, ChatMsgPayload)
             cached_messages.append(cached_msg)
             await self.handler.cached_chat_msg_received(sender_id=KademliaKey(cached_msg.sender_id),
                                                     sender_pubkey=cached_msg.sender_pubkey,

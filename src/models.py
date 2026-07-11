@@ -77,6 +77,11 @@ class Chat(Thing):
         """Last messages in ascending timestamp order up to specific timestamp (default now)"""
         pass
 
+    @abc.abstractmethod
+    async def get_current_chat_hash(self) -> bytes:
+        """Hash of the chat's chain head: the latest message id, or the secret if empty."""
+        pass
+
 
 class Message(Thing):
     id: MessageID
