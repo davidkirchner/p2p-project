@@ -146,13 +146,12 @@ async def main():
         prev_id = target_chat.secret if not last_messages else last_messages[0]
         msg_id = MessageID(msg_hash(prev_id, payload))
 
-        ts = datetime.now(tz=timezone.utc)  # TODO: we need the timestamp from the other user! When it was sent, not received
         # TODO: Deuplication! The same message may arrive twice => Message.create will fail
         message = await database.Message.create(
             id=msg_id,
             chat=target_chat.id,
             sender=sender_user.id,
-            timestamp=ts,
+            timestamp=payload.timestamp ,
             content=payload.message,
             content_type=payload.content_type
         )
