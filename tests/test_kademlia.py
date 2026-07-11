@@ -70,7 +70,7 @@ def make_msg(msg_type: MsgType, payload: Payload | dict, **overrides) -> Kademli
         sender_pubkey=pub_raw,
         payload=payload,
         # Built with an empty signature (verification is skipped for it) so we
-        # can sign the serialized message below, exactly as _new_msg() does.
+        # can sign the serialized message below, exactly as new_msg() does.
         signature=b"",
     )
     kwargs.update(overrides)
@@ -493,7 +493,7 @@ class TestKademliaNode:
 
     async def test_new_msg_is_signed_with_own_identity(self, node: KademliaNode):
         reply_to = uuid4().bytes
-        msg = node._new_msg(MsgType.PING, PingPayload(), in_reply_to=reply_to)
+        msg = node.new_msg(MsgType.PING, PingPayload(), in_reply_to=reply_to)
         assert msg.sender_id == node.node_id
         assert msg.sender_pubkey == node.pubkey
         assert msg.in_reply_to == reply_to
@@ -505,11 +505,11 @@ class TestKademliaNode:
         node = build_node(port=1234)
         ip = "203.0.113.7"
         receiver = invent_peer(ip)
-        msg = node._new_msg(MsgType.PING, PingPayload())
-        
+        msg = node.new_msg(MsgType.PING, PingPayload())
+
         await node._send(receiver, msg)
         dest_ip, dest_port, data = await get_outbox(node)
-        
+
         assert dest_ip == ip
         assert dest_port == KADEMLIA_PORT
         assert KademliaMsg.from_bytes(data).msg_id == msg.msg_id
@@ -517,7 +517,7 @@ class TestKademliaNode:
     # ---- request() correlation & timeout ------------------------------------
 
     async def test_request_times_out_and_cleans_up_pending(self, node: KademliaNode):
-        msg = node._new_msg(MsgType.PING, PingPayload())
+        msg = node.new_msg(MsgType.PING, PingPayload())
         with pytest.raises(asyncio.TimeoutError):
             await node.request(peer=invent_peer("198.51.100.1"), msg=msg, timeout=0.01)
         # The outstanding-request registration must be gone after a timeout.
@@ -997,5 +997,4 @@ class TestValueLookup:
 
         with pytest.raises(ValueError):
             await ValueLookup(node, TARGET).run()
-            
-            
+

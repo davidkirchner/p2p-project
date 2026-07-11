@@ -45,7 +45,7 @@ class Peer(BaseModel):
     id: KademliaKey
     ip: str
     pubkey: B64Bytes
-    
+
 def invent_peer(ip: str) -> Peer:
     enc = UserEncryption.create()
     return Peer(id=enc.id, ip=ip, pubkey=enc.public_bytes)
@@ -202,7 +202,7 @@ def byte_xor(a: bytes, b: bytes) -> bytes:
 class Contact:
     peer: Peer
     fail_counter: int = 0
-    
+
     @property
     def ip(self):
         return self.peer.ip
@@ -357,7 +357,7 @@ class KademliaNode(Closable):
         self.encrypt = encrypt
         # Outstanding requests awaiting a reply, keyed by the request's msg_id.
         self._pending_by_msg_id: dict[MsgId, _Pending] = {}
-        
+
     @property
     def peer(self) -> Peer:
         return Peer(id=self.node_id, ip=self.socket.ip, pubkey=self.encryption.public_bytes)
@@ -410,7 +410,7 @@ class KademliaNode(Closable):
         except ValueError:
             #No cached message found
             return None
-        
+
         cached_msg = KademliaMsg.from_bytes(cached_bytes)
         cached_msg.verify_signature()
         plaintext = self.decrypt_cached_message(cached_msg.payload.message)
@@ -418,11 +418,11 @@ class KademliaNode(Closable):
         if plaintext is None:
             #Decryption failed
             return None
-        
+
         cached_msg.payload.message = plaintext
 
         return cached_msg
-    
+
     async def retrieve_cached_messages(self, chat: m.Chat) -> list[KademliaMsg]:
         cached_messages: list[KademliaMsg] = []
 
@@ -447,7 +447,7 @@ class KademliaNode(Closable):
 
     # ---- message plumbing ----------------------------------------------------
 
-    def _new_msg(self, msg_type: MsgType, payload: Payload, in_reply_to: MsgId | None = None) -> KademliaMsg:
+    def new_msg(self, msg_type: MsgType, payload: Payload, in_reply_to: MsgId | None = None) -> KademliaMsg:
         """Wrap a payload into a KademliaMsg signed with our identity."""
         msg = KademliaMsg(
             msg_type=msg_type,
@@ -466,7 +466,7 @@ class KademliaNode(Closable):
         msg_bytes = msg.to_bytes()
         if self.encrypt:
             encr = PeerEncryption.from_peer(id=KademliaKey(dest.id), public_bytes=dest.pubkey)
-            msg_bytes_encr = self.encryption.encrypt(msg=msg_bytes, receiver=encr) 
+            msg_bytes_encr = self.encryption.encrypt(msg=msg_bytes, receiver=encr)
         else:
             msg_bytes_encr = EncryptedMsg(msg_bytes)
         await self.socket.outbox_queue.put((dest.ip, KADEMLIA_PORT, msg_bytes_encr))
@@ -497,7 +497,7 @@ class KademliaNode(Closable):
 
     async def ping(self, peer_id: KademliaKey, timeout: float = 5.0) -> bool:
         """Send a PING and wait for the PONG. True if it arrives in time."""
-        msg = self._new_msg(MsgType.PING, PingPayload())
+        msg = self.new_msg(MsgType.PING, PingPayload())
         try:
             await self.request(msg=msg, peer=peer_id, timeout=timeout)
             return True
@@ -511,16 +511,16 @@ class KademliaNode(Closable):
         Raises `RuntimeError` if the responder's identity differs from `peer_id`.
         """
         peer = await self.resolve_peer(peer_id)
-        msg = self._new_msg(MsgType.PING, PingPayload())
+        msg = self.new_msg(MsgType.PING, PingPayload())
         reply = await self.request(msg=msg, peer=peer, timeout=timeout)
         if reply.sender_id != peer_id:
             raise RuntimeError("Response's sender identity does not match the requested peer ID")
-        
+
         return Peer(id=KademliaKey(reply.sender_id), ip=peer.ip, pubkey=reply.sender_pubkey)
 
     async def _pong(self, peer: Peer, in_reply_to: MsgId) -> None:
         """Fire-and-forget reply to a PING."""
-        await self._send(peer, self._new_msg(MsgType.PONG, PongPayload(), in_reply_to))
+        await self._send(peer, self.new_msg(MsgType.PONG, PongPayload(), in_reply_to))
 
     def _ping_with_buckets_side_effect(self, peer: Peer) -> None:
         """
@@ -529,7 +529,7 @@ class KademliaNode(Closable):
         is able to register failed contact for Buckets.
         """
         async def _ping():
-            msg = self._new_msg(MsgType.PING, PingPayload())
+            msg = self.new_msg(MsgType.PING, PingPayload())
             await self.request(msg=msg, peer=peer)
 
         self.bind_closable(_ping())
@@ -544,7 +544,7 @@ class KademliaNode(Closable):
         arrives on time, `None` otherwise.
         Provide `peer_id` if possibel, so `request` can register possible failures in Buckets.
         """
-        msg = self._new_msg(
+        msg = self.new_msg(
             msg_type=MsgType.FIND_NODE,
             payload=FindNodePayload(target=target),
         )
@@ -557,7 +557,7 @@ class KademliaNode(Closable):
 
     async def _find_node_reply(self, peer: Peer, in_reply_to: MsgId, target: KademliaKey) -> None:
         """Fire-and-foreget reply to FIND_NODE"""
-        msg = self._new_msg(
+        msg = self.new_msg(
             msg_type=MsgType.FIND_NODE_REPLY,
             payload=FindNodeReplyPayload(
                 nodes=self.buckets.get_k_nearest_neighbors(target)
@@ -575,7 +575,7 @@ class KademliaNode(Closable):
         """
         Send a FIND_VALUE request. Returns `None` on timeout, `FindValueReplyPayload` otherwise.
         """
-        msg = self._new_msg(
+        msg = self.new_msg(
             msg_type=MsgType.FIND_VALUE,
             payload=FindValuePayload(key=key),
         )
@@ -596,7 +596,7 @@ class KademliaNode(Closable):
             assert neighbors is not None
             payload = FindValueReplyPayload(nodes=neighbors)
 
-        msg = self._new_msg(
+        msg = self.new_msg(
             msg_type=MsgType.FIND_VALUE_REPLY,
             payload=payload,
             in_reply_to=in_reply_to
@@ -609,7 +609,7 @@ class KademliaNode(Closable):
         returns `True` on success.
         """
         key = hashlib.sha256(value).digest()
-        msg = self._new_msg(
+        msg = self.new_msg(
             msg_type=MsgType.STORE,
             payload=StorePayload(key=key, value=value)
         )
@@ -622,7 +622,7 @@ class KademliaNode(Closable):
 
     async def _store_reply(self, peer: Peer, in_reply_to: MsgId, success: bool) -> None:
         """Fire-and-forget reply to STORE"""
-        msg = self._new_msg(
+        msg = self.new_msg(
             msg_type=MsgType.STORE_REPLY,
             payload=StoreReplyPayload(success=success),
             in_reply_to=in_reply_to
@@ -637,7 +637,7 @@ class KademliaNode(Closable):
         """
         peer = await self.resolve_peer(peer_id)
 
-        msg = self._new_msg(
+        msg = self.new_msg(
             msg_type=MsgType.CHAT_MSG,
             payload=ChatMsgPayload(
                 chat_id=chat_id,
@@ -660,7 +660,7 @@ class KademliaNode(Closable):
         """
         Fire-and-forget reply to CHAT_MSG
         """
-        msg = self._new_msg(
+        msg = self.new_msg(
             msg_type=MsgType.CHAT_MSG_REPLY,
             payload=ChatMsgReplyPayload(success = success),
             in_reply_to = in_reply_to
@@ -672,7 +672,7 @@ class KademliaNode(Closable):
     def _is_valid_reply(self, sender_ip: str, msg: KademliaMsg) -> bool:
         if not msg.in_reply_to:
             return False
-        
+
         pending = self._pending_by_msg_id.get(msg.in_reply_to)
         if pending is None:
             # No one is waiting: late, duplicate, or unwanted reply.
@@ -694,7 +694,7 @@ class KademliaNode(Closable):
     async def handle_msg(self, sender_ip: str, msg: KademliaMsg):
         # Replies are correlated back to whoever is awaiting their request.
         peer = Peer(id=KademliaKey(msg.sender_id), ip=sender_ip, pubkey=msg.sender_pubkey)
-        
+
         if msg.in_reply_to is not None:
             if not self._is_valid_reply(sender_ip, msg):
                 return
@@ -773,7 +773,7 @@ class KademliaNode(Closable):
     async def recv_loop(self):
         while True:
             sender_ip, raw_msg_encr = await self.socket.inbox_queue.get()
-            
+
             try:
                 raw_msg = self.encryption.decrypt(raw_msg_encr) if self.encrypt else raw_msg_encr
                 parsed = KademliaMsg.from_bytes(raw_msg)
@@ -789,7 +789,7 @@ class KademliaNode(Closable):
             except InvalidSignature as e:
                 logger.warning(f"Message from {sender_ip} has invalid signature", exc_info=e)
                 continue
-            
+
             logger.debug(f"Received {parsed.msg_type.value} from {sender_ip}")
             await self.handle_msg(sender_ip, parsed)
 

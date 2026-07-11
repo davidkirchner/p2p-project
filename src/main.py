@@ -1,4 +1,5 @@
 import asyncio
+from hashlib import sha256
 import json
 import logging
 import secrets
@@ -10,7 +11,7 @@ from typing import cast
 
 from encryption import EncryptedMsg, PeerEncryption, UserEncryption
 import encryption
-from kademlia.kademlia import ChatMsgPayload, KademliaNode, Peer, kademlia_key, Handler as KademliaHandler
+from kademlia.kademlia import ChatMsgPayload, KademliaNode, MsgType, Peer, kademlia_key, Handler as KademliaHandler
 from kademlia.types import ContentType, KademliaKey
 from logging_setup import setup_logging
 from config import Config
@@ -18,6 +19,11 @@ from db.sqlite_impl import SqliteDatabase
 from models import Chat, ChatID, MessageID, User, UserID
 from socket_handler import SocketHandler
 from ui.simple import SimpleTerminalUI, Handler as UIHandler
+
+def msg_hash(prev_hash: bytes, current_msg: ChatMsgPayload) -> bytes:
+    current_msg_bytes = current_msg.model_dump_json(ensure_ascii=False).encode("utf-8")
+    return sha256(prev_hash + current_msg_bytes).digest()
+
 
 async def main():
     # TODO: ideally, the correct env file is passed in during program invocation.
@@ -71,43 +77,43 @@ async def main():
         prev_id = chat.secret if not last_messages else last_messages[0]
         # and calculate the message ID.
         # TODO: this is mostly duplicated logic from below. This stuff needs some major refactor at some point!
-        msg_id = MessageID(kademlia_key(prev_id + msg_payload.model_dump_json(ensure_ascii=False).encode("utf-8")))
-        
+        msg_id = MessageID(msg_hash(prev_id, msg_payload))
+
         if await kademlia.chat_msg_req(peer_id=target_peer.id, chat_id=chat_id, shared_secret=chat.secret, message=content, content_type=content_type, timestamp=msg_payload.timestamp):
             # message sent successfully, store in db and finish
             await database.Message.create(
-                id=msg_id, 
-                chat=chat.id, 
-                sender=user_id, 
-                timestamp=msg_payload.timestamp, 
-                content=content, 
+                id=msg_id,
+                chat=chat.id,
+                sender=user_id,
+                timestamp=msg_payload.timestamp,
+                content=content,
                 content_type=content_type
             )
             return
-        
+
         # could not send the message directly (in time)
         # in this case, we cache offline
         # we first calculate the location like this
-        location_key = kademlia_key(msg_id + user_id)
+        location_key = kademlia_key(prev_id + user_id)
         target_peer_encr = PeerEncryption.from_stored(target_peer)
-        
-        # raw message contents to be cached
-        offline_store_bytes_raw = msg_payload.model_dump_json(ensure_ascii=False).encode("utf-8")
-        # sign that
-        offline_store_bytes_raw_signed = offline_store_bytes_raw + kademlia.encryption.sign(offline_store_bytes_raw)
+
+        # wrap the payload in the same signed KademliaMsg envelope used on the wire,
+        # so the receiver can decode it with from_bytes() and verify the signature
+        cached_msg = kademlia.new_msg(MsgType.CHAT_MSG, msg_payload)
+        offline_store_bytes_raw = cached_msg.to_bytes()
         if kademlia.encrypt:
-            # and then encrypt it for only the receiver (the other chat participant, not the cache location) to read
-            offline_store_bytes_encr = kademlia.encryption.encrypt(msg=offline_store_bytes_raw_signed, receiver=target_peer_encr)
+            # encrypt it for only the receiver (the other chat participant, not the cache location) to read
+            offline_store_bytes_encr = kademlia.encryption.encrypt(msg=offline_store_bytes_raw, receiver=target_peer_encr)
         else:
-            offline_store_bytes_encr = EncryptedMsg(offline_store_bytes_raw_signed)
-        
+            offline_store_bytes_encr = EncryptedMsg(offline_store_bytes_raw)
+
         # then find all the neighbouring nodes to that location and ask them to store (please)
         for offline_cache_peer in await kademlia.find_node(location_key):
             if not await kademlia.store_req(offline_cache_peer, value=offline_store_bytes_encr):
                 logger.warning(f"Could not store message at location {offline_cache_peer.id} for some reason")
             else:
                 logger.info(f"Cached message at location {offline_cache_peer.id}")
-        
+
         # and now we're done. Waiting for them to pick up the message
 
     async def chat_msg_received(sender: Peer, payload: ChatMsgPayload):
@@ -134,20 +140,20 @@ async def main():
                 description=f"Chat between you and {sender_name}",
                 participants=[current_user, sender_user.id]
             )
-        
+
         # we need to fetch this so we can calculate the message id
         last_messages = await target_chat.messages(1)
         prev_id = target_chat.secret if not last_messages else last_messages[0]
-        msg_id = MessageID(kademlia_key(prev_id + payload.model_dump_json(ensure_ascii=False).encode("utf-8")))
+        msg_id = MessageID(msg_hash(prev_id, payload))
 
         ts = datetime.now(tz=timezone.utc)  # TODO: we need the timestamp from the other user! When it was sent, not received
         # TODO: Deuplication! The same message may arrive twice => Message.create will fail
         message = await database.Message.create(
-            id=msg_id, 
-            chat=target_chat.id, 
-            sender=sender_user.id, 
-            timestamp=ts, 
-            content=payload.message, 
+            id=msg_id,
+            chat=target_chat.id,
+            sender=sender_user.id,
+            timestamp=ts,
+            content=payload.message,
             content_type=payload.content_type
         )
         await ui.received_message(message)
