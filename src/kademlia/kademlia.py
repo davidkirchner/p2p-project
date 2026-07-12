@@ -801,6 +801,7 @@ class KademliaNode(Closable):
             await self.handle_msg(sender_ip, parsed)
 
     async def run(self):
+        await self.socket.start("0.0.0.0", 9009)
         logger.info("Kademlia node %s listening on port %d", self.node_id.hex()[:8], self.port)
         self.bind_named_closable(self.recv_loop.__name__, asyncio.create_task(self.recv_loop()))
         await self.join_network()
