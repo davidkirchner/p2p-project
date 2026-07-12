@@ -793,11 +793,12 @@ class TestKademliaNode:
         a.resolve_peer = mocked_resolve_peer
         b.resolve_peer = mocked_resolve_peer
 
-        value = os.urandom(64)
+        key = os.urandom(32)
+        value = os.urandom(1024)
 
         # The value does reach b's DHT, but the ack never correlates back.
-        assert await a.store_req(mock_peer("10.0.0.2", b.node_id), value) is True
-        assert b.dht[hashlib.sha256(value).digest()] == value
+        assert await a.store_req(mock_peer("10.0.0.2", b.node_id), key, value) is True
+        assert b.dht[key] == value
 
     async def test_e2e_find_node_returns_peers_neighbors(self, network: FakeNetwork):
         a = network.add_node("10.0.0.1", build_node())

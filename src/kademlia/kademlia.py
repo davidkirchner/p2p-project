@@ -428,8 +428,6 @@ class KademliaNode(Closable):
             return None
 
         assert isinstance(cached_msg.payload, ChatMsgPayload)
-        cached_msg.payload.message = plaintext
-
         return cached_msg
 
     async def retrieve_cached_messages(self, chat: m.Chat) -> list[KademliaMsg]:
@@ -613,12 +611,11 @@ class KademliaNode(Closable):
         )
         await self._send(peer, msg)
 
-    async def store_req(self, peer: Peer, value: bytes, timeout: float = 5.0) -> bool:
+    async def store_req(self, peer: Peer, key: bytes, value: bytes, timeout: float = 5.0) -> bool:
         """
         Send a STORE request. Returns `False` on timeout or failure,
         returns `True` on success.
         """
-        key = hashlib.sha256(value).digest()
         msg = self.new_msg(
             msg_type=MsgType.STORE,
             payload=StorePayload(key=key, value=value)

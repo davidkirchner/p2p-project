@@ -109,7 +109,7 @@ async def main():
 
         # then find all the neighbouring nodes to that location and ask them to store (please)
         for offline_cache_peer in await kademlia.find_node(location_key):
-            if not await kademlia.store_req(offline_cache_peer, value=offline_store_bytes_encr):
+            if not await kademlia.store_req(offline_cache_peer, key=location_key, value=offline_store_bytes_encr):
                 logger.warning(f"Could not store message at location {offline_cache_peer.id} for some reason")
             else:
                 logger.info(f"Cached message at location {offline_cache_peer.id}")
