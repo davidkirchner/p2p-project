@@ -16,7 +16,7 @@ class AnySocketHandler(Protocol):
     outbox_queue: asyncio.Queue[OutboxData]
     ip: str
     port: int
-    
+
     async def start(self, host, port): ...
     async def close(self): ...
 
@@ -28,16 +28,16 @@ class SocketHandler(Closable, AnySocketHandler):
         self._port: int | None = None
         self.inbox_queue = asyncio.Queue()
         self.outbox_queue = asyncio.Queue()
-        
+
     @property
     def ip(self) -> str: # type: ignore
         assert self._ip is not None
-        return self.ip
+        return self._ip
 
     @property
-    def port(self) -> str: # type: ignore
+    def port(self) -> int: # type: ignore
         assert self._port is not None
-        return self.port
+        return self._port
 
     async def _send_loop(self):
         while True:
@@ -99,14 +99,12 @@ class SocketHandler(Closable, AnySocketHandler):
             await server.serve_forever()
 
     async def start(self, host="0.0.0.0", port=9009):
-        # Bind the listening socket *before* returning, so callers can rely on
-        # the server actually accepting connections once start() completes.
-        # asyncio.start_server only resolves once the socket is bound and
-        # listening; serve_forever() is kept alive as a background task.
         server = await asyncio.start_server(
             client_connected_cb=self._handle_client,
             host=host,
             port=port,
+            # Shadow does not support SO_REUSEADDR but asyncio defaults it to True
+            reuse_address=False,
         )
         logger.info("Server listening on %s:%s", host, port)
         self._ip = host

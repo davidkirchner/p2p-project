@@ -343,11 +343,12 @@ class KademliaNode(Closable):
     populates k-Buckets when started.
     """
 
-    def __init__(self, socket: AnySocketHandler, node_id: KademliaKey, pubkey: bytes, encryption: UserEncryption, handler: Handler, port: int = KADEMLIA_PORT, encrypt: bool = True) -> None:
+    def __init__(self, socket: AnySocketHandler, node_id: KademliaKey, pubkey: bytes, encryption: UserEncryption, handler: Handler, port: int = KADEMLIA_PORT, encrypt: bool = True, host: str = "0.0.0.0", bootstrap_peers: list[Peer] | None = None) -> None:
         super().__init__()
         self.socket = socket
         self.node_id = node_id
         self.pubkey = pubkey
+        self.host = host
         self.port = port
         self.encryption = encryption
         self.buckets = Buckets(node_id, self._ping_with_buckets_side_effect)
@@ -355,6 +356,7 @@ class KademliaNode(Closable):
         self.dht: dict[bytes, Any] = {} # TODO: store this in a more appropriate way
         self.handler = handler
         self.encrypt = encrypt
+        self.bootstrap_peers = bootstrap_peers
         # Outstanding requests awaiting a reply, keyed by the request's msg_id.
         self._pending_by_msg_id: dict[MsgId, _Pending] = {}
 
@@ -375,7 +377,8 @@ class KademliaNode(Closable):
 
     async def join_network(self) -> None:
         #Register bootstrap peers
-        for peer in BOOTSTRAP_PEERS:
+        bootstrap_peers = self.bootstrap_peers if self.bootstrap_peers is not None else BOOTSTRAP_PEERS
+        for peer in bootstrap_peers:
             if peer.id == self.node_id:
                 continue
             self.buckets.register_successful_contact(peer)
@@ -477,7 +480,7 @@ class KademliaNode(Closable):
             msg_bytes_encr = self.encryption.encrypt(msg=msg_bytes, receiver=encr)
         else:
             msg_bytes_encr = EncryptedMsg(msg_bytes)
-        await self.socket.outbox_queue.put((dest.ip, KADEMLIA_PORT, msg_bytes_encr))
+        await self.socket.outbox_queue.put((dest.ip, self.port, msg_bytes_encr))
 
     async def request(self, *, msg: KademliaMsg, peer: Peer | KademliaKey, timeout: float = 5.0) -> KademliaMsg:
         """
@@ -801,7 +804,7 @@ class KademliaNode(Closable):
             await self.handle_msg(sender_ip, parsed)
 
     async def run(self):
-        await self.socket.start("0.0.0.0", 9009)
-        logger.info("Kademlia node %s listening on port %d", self.node_id.hex()[:8], self.port)
+        await self.socket.start(self.host, self.port)
+        logger.info("Kademlia node %s listening on %s:%d", self.node_id.hex()[:8], self.host, self.port)
         self.bind_named_closable(self.recv_loop.__name__, asyncio.create_task(self.recv_loop()))
         await self.join_network()

@@ -499,9 +499,7 @@ class TestKademliaNode:
         assert msg.in_reply_to == reply_to
         assert isinstance(msg.payload, PingPayload)
 
-    async def test_send_uses_well_known_port_not_node_port(self):
-        # The node's own listen port must not leak into the destination port:
-        # messages always go to the network-wide KADEMLIA_PORT.
+    async def test_send_uses_network_wide_port(self):
         node = build_node(port=1234)
         ip = "203.0.113.7"
         receiver = invent_peer(ip)
@@ -511,7 +509,7 @@ class TestKademliaNode:
         dest_ip, dest_port, data = await get_outbox(node)
 
         assert dest_ip == ip
-        assert dest_port == KADEMLIA_PORT
+        assert dest_port == node.port == 1234
         assert KademliaMsg.from_bytes(data).msg_id == msg.msg_id
 
     # ---- request() correlation & timeout ------------------------------------
