@@ -821,6 +821,47 @@ class TestKademliaNode:
         assert reply is not None
         assert reply.value == value
 
+    async def test_e2e_cache_and_retrieve_message(self, network: FakeNetwork):
+        # Node A caches a signed+sealed CHAT_MSG in the DHT for (offline) node B;
+        # B later reconstructs the location key and pulls the message back out.
+        # The blob lives on a holder node (the peer responsible for the key), which
+        # B has in its routing table so its find_value lookup lands there.
+        a = network.add_node("10.0.0.1", build_node())
+        holder = network.add_node("10.0.0.2", build_node())
+        b = network.add_node("10.0.0.3", build_node())
+        b.buckets.register_successful_contact(mock_peer("10.0.0.2", holder.node_id))
+
+        chat_hash = os.urandom(32)
+        payload = ChatMsgPayload(
+            chat_id=uuid4().bytes,
+            shared_secret=os.urandom(32),
+            message=b"you awake?",
+            content_type="text/plain",
+            timestamp=datetime.now(tz=timezone.utc),
+        )
+
+        msg = a.new_msg(MsgType.CHAT_MSG, payload)
+        b_enc = PeerEncryption.from_peer(id=KademliaKey(b.node_id), public_bytes=b.pubkey)
+        blob = a.encryption.encrypt(receiver=b_enc, msg=msg.to_bytes())
+
+        # A caches it at the chat's location key (derived from A's id).
+        location_key = a.get_location_key(chat_hash, a.node_id)
+        assert await a.store_req(mock_peer("10.0.0.2", holder.node_id), key=location_key, value=blob)
+        assert holder.dht[location_key] == blob
+
+        # B reconstructs the same key via A's id (the other participant) and fetches it.
+        chat = AsyncMock()
+        chat.participants = [b.node_id, a.node_id]
+        chat.get_current_chat_hash = AsyncMock(return_value=chat_hash)
+
+        result = await b.retrieve_cached_message(chat)
+
+        assert result is not None
+        result.verify_signature()
+        assert result.sender_id == a.node_id
+        assert isinstance(result.payload, ChatMsgPayload)
+        assert result.payload.message == payload.message
+
 
 # =============================================================================
 # NodeLookup / ValueLookup tests
