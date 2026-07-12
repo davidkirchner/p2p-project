@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  test:
+  unit-test:
     runs-on: ubuntu-latest
 
     steps:
@@ -21,5 +21,62 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
-      - name: Run pytest
-        run: uv run pytest
+      - name: Run tests (excluding shadow)
+        run: uv run pytest -m "not shadow"
+
+  shadow-test:
+    runs-on: ubuntu-latest
+
+    env:
+      SHADOW_VERSION: v3.3.0
+      # Must live on GitHub-hosted ubuntu runners (HOME = /home/runner);
+      # actions/cache cannot expand $HOME, so use an absolute path.
+      SHADOW_PREFIX: /home/runner/opt/shadow
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync
+
+      # Runtime and build dependencies: always required, even on a cache hit
+      # (the cached binary links against glib etc.).
+      - name: Install Shadow dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake libclang-dev libc-dbg libglib2.0-0 libglib2.0-dev \
+            make netbase python3 python3-networkx xz-utils util-linux gcc g++
+
+      - name: Cache Shadow build
+        id: cache-shadow
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.SHADOW_PREFIX }}
+          key: shadow-${{ env.SHADOW_VERSION }}-${{ runner.os }}
+
+      - name: Build & install Shadow
+        if: steps.cache-shadow.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch "$SHADOW_VERSION" https://github.com/shadow/shadow.git
+          cd shadow
+          ./setup build --jobs "$(nproc)" --prefix "$SHADOW_PREFIX"
+          ./setup install
+
+      - name: Add Shadow to PATH & verify
+        run: |
+          echo "$SHADOW_PREFIX/bin" >> "$GITHUB_PATH"
+          "$SHADOW_PREFIX/bin/shadow" --version
+
+      - name: Relax ptrace scope (Shadow needs it)
+        run: sudo sysctl -w kernel.yama.ptrace_scope=0
+
+      - name: Run shadow tests
+        run: uv run pytest -m shadow

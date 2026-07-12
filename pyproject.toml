@@ -19,6 +19,9 @@ dependencies = [
 testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
+markers = [
+    "shadow: tests that use shadow network simulator (requires shadow binary)",
+]
 
 [dependency-groups]
 dev = [
