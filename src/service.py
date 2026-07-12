@@ -65,8 +65,8 @@ class MessagingService(Closable):
             pubkey=ue.public_bytes,
             encryption=ue,
             handler=KademliaHandler(
-                self._chat_msg_received,
-                self._cached_chat_msg_received,
+                chat_msg_received=self._chat_msg_received,
+                cached_chat_msg_received=self._cached_chat_msg_received,
             ),
             host=self.config.bind_host,
             port=self.config.port,

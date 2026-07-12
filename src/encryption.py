@@ -70,7 +70,14 @@ class UserEncryption(PeerEncryption):
 
     @classmethod
     def create(cls) -> Self:
-        signing_key = SigningKey.generate()
+        return cls.from_signing_key(SigningKey.generate())
+
+    @classmethod
+    def from_seed(cls, seed: bytes) -> Self:
+        return cls.from_signing_key(SigningKey(seed=seed))
+
+    @classmethod
+    def from_signing_key(cls, signing_key: SigningKey) -> Self:
         verify_key = signing_key.verify_key
         public_bytes = bytes(verify_key)
 
