@@ -4,3 +4,7 @@
 var
 *.env
 .coverage
+
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
