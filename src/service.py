@@ -10,6 +10,7 @@ from config import Config
 from encryption import EncryptedMsg, PeerEncryption, UserEncryption
 from handlers import HandlerBase
 from kademlia.kademlia import (
+    DEFAULT_TIMEOUT,
     ChatMsgPayload,
     KademliaNode,
     MsgType,
@@ -20,6 +21,7 @@ from kademlia.kademlia import (
 from kademlia.types import ContentType, KademliaKey
 from models import Chat, ChatID, Message, MessageID, Storage, User, UserID
 from socket_handler import AnySocketHandler, SocketHandler
+from ui import display_key
 
 logger = logging.getLogger(__name__)
 
@@ -207,7 +209,7 @@ class MessagingService(Closable):
             participants=[own_id, peer_user.id],
         )
         # Send an initial chat message so the chat partner learns about the shared secret
-        init_content = f"Chat Init from {self.kademlia.node_id.hex()}".encode("utf-8")
+        init_content = f"Chat Init from {display_key(self.kademlia.node_id)}".encode("utf-8")
         init_ts = datetime.now(tz=timezone.utc)
         chat_init_success = await self.kademlia.chat_msg_req(
             peer_id=peer_id,

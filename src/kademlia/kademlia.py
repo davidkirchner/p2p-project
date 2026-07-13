@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 KADEMLIA_PORT = 9009
 ID_SPACE = 256 # bit
 ALPHA = 3
+DEFAULT_TIMEOUT = 2.0
 
 
 def kademlia_key(data: bytes) -> KademliaKey:
@@ -482,7 +483,7 @@ class KademliaNode(Closable):
             msg_bytes_encr = EncryptedMsg(msg_bytes)
         await self.socket.outbox_queue.put((dest.ip, self.port, msg_bytes_encr))
 
-    async def request(self, *, msg: KademliaMsg, peer: Peer | KademliaKey, timeout: float = 5.0) -> KademliaMsg:
+    async def request(self, *, msg: KademliaMsg, peer: Peer | KademliaKey, timeout: float = DEFAULT_TIMEOUT) -> KademliaMsg:
         """
         Send `msg` and wait for the reply (in_reply_tp == msg.msg_id).
         Raises `asyncio.TimeoutError` if no reply comes within `timeout` seconds.
@@ -506,7 +507,7 @@ class KademliaNode(Closable):
 
     # ---- RPCs ----------------------------------------------------------------
 
-    async def ping(self, peer_id: KademliaKey, timeout: float = 5.0) -> bool:
+    async def ping(self, peer_id: KademliaKey, timeout: float = DEFAULT_TIMEOUT) -> bool:
         """Send a PING and wait for the PONG. True if it arrives in time."""
         msg = self.new_msg(MsgType.PING, PingPayload())
         try:
@@ -515,7 +516,7 @@ class KademliaNode(Closable):
         except (asyncio.TimeoutError, RuntimeError):
             return False
 
-    async def get_peer_infos(self, peer_id: KademliaKey, timeout: float = 5.0) -> Peer:
+    async def get_peer_infos(self, peer_id: KademliaKey, timeout: float = DEFAULT_TIMEOUT) -> Peer:
         """
         Returns the most up-to-date info about a peer (by contacting directly)
         Raises `asyncio.TimeoutError` if the peer does not answer in time.
@@ -549,7 +550,7 @@ class KademliaNode(Closable):
         from .lookup import NodeLookup
         return await NodeLookup(self, target).run()
 
-    async def _find_node_req(self, target: KademliaKey, peer: Peer, timeout: float = 5.0) -> list[Peer] | None:
+    async def _find_node_req(self, target: KademliaKey, peer: Peer, timeout: float = DEFAULT_TIMEOUT) -> list[Peer] | None:
         """
         Send a FIND_NODE request and wait for the reply. Returns `list[Peer]` if reply
         arrives on time, `None` otherwise.
@@ -582,7 +583,7 @@ class KademliaNode(Closable):
         return await ValueLookup(self, key).run()
 
 
-    async def _find_value_req(self, peer: Peer, key: KademliaKey, timeout: float = 5.0) -> None | FindValueReplyPayload:
+    async def _find_value_req(self, peer: Peer, key: KademliaKey, timeout: float = DEFAULT_TIMEOUT) -> None | FindValueReplyPayload:
         """
         Send a FIND_VALUE request. Returns `None` on timeout, `FindValueReplyPayload` otherwise.
         """
@@ -614,7 +615,7 @@ class KademliaNode(Closable):
         )
         await self._send(peer, msg)
 
-    async def store_req(self, peer: Peer, key: bytes, value: bytes, timeout: float = 5.0) -> bool:
+    async def store_req(self, peer: Peer, key: bytes, value: bytes, timeout: float = DEFAULT_TIMEOUT) -> bool:
         """
         Send a STORE request. Returns `False` on timeout or failure,
         returns `True` on success.
@@ -640,7 +641,7 @@ class KademliaNode(Closable):
         await self._send(peer, msg)
 
     async def chat_msg_req(self, peer_id: KademliaKey, chat_id: bytes, shared_secret: bytes, message: bytes,
-                           content_type: ContentType, timestamp: datetime, timeout: float = 5.0) -> bool:
+                           content_type: ContentType, timestamp: datetime, timeout: float = DEFAULT_TIMEOUT) -> bool:
         """
         Sends an application level CHAT MESSAGE. Returns 'True' if the recipient acknowledges it before timeout,
         'False' otherwise

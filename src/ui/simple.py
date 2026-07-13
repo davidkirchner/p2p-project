@@ -24,6 +24,7 @@ from aioitertools.helpers import maybe_await
 
 
 from models import ChatID, UserID
+from ui import display_key
 
 
 class Handler(HandlerBase):
@@ -256,7 +257,7 @@ class SimpleTerminalUI(Closable):
                             continue
                         chat_id = chat.id
                     else:
-                        chat_id = await self._input(ChoiceParser(chat_ids), "Select one of your chats: ")
+                        chat_id = await self._input(ChoiceParser([display_key(chat_id) for chat_id in chat_ids]), "Select one of your chats: ")
                     await self.set_chat(chat_id)
                 else:
                     await self._messages_view()
@@ -280,7 +281,7 @@ class SimpleTerminalUI(Closable):
 
     async def set_user(self, user: UserID):
         self.user = user
-        await self._print(f"Your node ID (share it so others can start a chat with you): {b64encode(user).decode('ascii')}")
+        await self._print(f"Your node ID (share it so others can start a chat with you): {display_key(user)}")
         await self._broadcast_state_change()
 
     async def set_chat(self, chat: ChatID | None):
