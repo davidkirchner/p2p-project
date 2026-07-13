@@ -275,13 +275,15 @@ class SimpleTerminalUI(Closable):
                 msg = await self._input(InputParser())
                 await self.send_message(msg)
 
+        await self.set_chat(None)
+
 
     async def set_user(self, user: UserID):
         self.user = user
         await self._print(f"Your node ID (share it so others can start a chat with you): {b64encode(user).decode('ascii')}")
         await self._broadcast_state_change()
 
-    async def set_chat(self, chat: ChatID):
+    async def set_chat(self, chat: ChatID | None):
         self.chat = chat
         await self._broadcast_state_change()
 
@@ -302,7 +304,18 @@ class SimpleTerminalUI(Closable):
         if self.chat is None or self.user is None:
             await self._print_error("Cannot send messages since no chat is selected.")
             return
-        self.bind_closable(self.handler.send_message(self.user, self.chat, content=message.encode("utf-8"), content_type="text/plain"))
+        outcome = await self.handler.send_message(
+            self.user, self.chat, content=message.encode("utf-8"), content_type="text/plain"
+        )
+        await self._print("\033[F\r\033[K", end=None)
+        if outcome == "delivered":
+            msg_ids = await (await self.database.Chat.by_id(self.chat)).messages(1)
+            if msg_ids:
+                await self._print_message(await self.database.Message.by_id(msg_ids[0]))
+        elif outcome == "cached":
+            await self._print(f"(cached - peer offline) {message}")
+        else:
+            await self._print_error(f"Could not send: {message!r}")
 
     async def exit_ui(self):
         await self._print("Goodbye!")
@@ -332,8 +345,11 @@ class SimpleTerminalUI(Closable):
             finally:
                 self._input_fut = None
 
-            if raw_input.strip().lower() == "exit":
+            if raw_input.strip().lower() == "esc":
                 raise Escape()
+
+            if raw_input.strip().lower() == "exit":
+                await self.exit_ui()
 
             if raw_input.strip().lower() == "reset":
                 raise Reset()

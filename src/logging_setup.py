@@ -16,6 +16,8 @@ DEFAULT_LEVEL = "INFO"
 LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+LOG_FILE = "app.log"
+
 
 def setup_logging(level: str | int | None = None) -> None:
     if level is None:
@@ -25,4 +27,5 @@ def setup_logging(level: str | int | None = None) -> None:
         level=level,
         format=LOG_FORMAT,
         datefmt=DATE_FORMAT,
+        filename=LOG_FILE,
     )
