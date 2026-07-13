@@ -73,6 +73,7 @@ class MessagingService(Closable):
             bootstrap_peers=bootstrap_peers,
         )
         await self.kademlia.run()
+        await self.retrieve_cached_messages()
         return self.kademlia
 
     async def create_user(self, name: str) -> User:
@@ -170,7 +171,17 @@ class MessagingService(Closable):
                 caching_succeeded = True
                 logger.info(f"Cached message at location {offline_cache_peer.id}")
 
-        return "cached" if caching_succeeded else "failed"
+        if caching_succeeded:
+            await self.database.Message.create(
+                id=msg_id,
+                chat=chat.id,
+                sender=user_id,
+                timestamp=msg_payload.timestamp,
+                content=content,
+                content_type=content_type,
+            )
+            return "cached"
+        return "failed"
 
     async def initialize_chat(self, own_id: UserID, peer_id: KademliaKey) -> Chat:
         assert self.kademlia
@@ -196,21 +207,42 @@ class MessagingService(Closable):
             participants=[own_id, peer_user.id],
         )
         # Send an initial chat message so the chat partner learns about the shared secret
+        init_content = f"Chat Init from {self.kademlia.node_id.hex()}".encode("utf-8")
+        init_ts = datetime.now(tz=timezone.utc)
         chat_init_success = await self.kademlia.chat_msg_req(
             peer_id=peer_id,
             chat_id=chat.id,
             shared_secret=chat.secret,
-            message=f"Chat Init from {self.kademlia.node_id.hex()}".encode("utf-8"),
+            message=init_content,
             content_type="text/plain",
-            timestamp=datetime.now(tz=timezone.utc),
+            timestamp=init_ts,
         )
         if not chat_init_success:
             await chat.delete()
             raise RuntimeError("Chat initialization failed")
+
+        # receipient stores the init message, so we have to store it also. Otherwise the hash chains diverge
+        init_payload = ChatMsgPayload(
+            chat_id=chat.id,
+            shared_secret=chat.secret,
+            message=init_content,
+            content_type="text/plain",
+            timestamp=init_ts,
+        )
+        init_id = MessageID(msg_hash(chat.secret, init_payload))
+        await self.database.Message.create(
+            id=init_id,
+            chat=chat.id,
+            sender=own_id,
+            timestamp=init_ts,
+            content=init_content,
+            content_type="text/plain",
+        )
         return chat
 
     async def retrieve_cached_messages(self) -> None:
         """Pull any messages cached in the DHT for all chats"""
+        logger.info("Searching for cached messages in the network")
         assert self.kademlia
         current_user = UserID(KademliaKey(self.kademlia.node_id))
         chat_ids = await (await self.database.User.by_id(current_user)).chats()

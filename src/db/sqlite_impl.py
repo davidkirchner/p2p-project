@@ -221,17 +221,19 @@ class SqliteDatabase(m.Storage):
                 if before is None:
                     before = datetime.now(tz=timezone.utc)
                 rows = connection.execute(
-                    "SELECT id FROM message WHERE chat = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT ?",
+                    "SELECT id FROM message WHERE chat = ? AND timestamp < ? ORDER BY timestamp desc LIMIT ?",
                     (self.id, before.isoformat(), n)
                 ).fetchall()
-                return [m.MessageID(r[0]) for r in rows]
-            
+                msg_ids = [m.MessageID(r[0]) for r in rows]
+                msg_ids.reverse()
+                return msg_ids
+
             async def get_current_chat_hash(self) -> bytes:
                 latest_messages = await self.messages(1)
-                
+
                 if not latest_messages:
                     raise ValueError(f"No messages found for chat {self.id}")
-                
+
                 return latest_messages[0]
 
             def __repr__(self) -> str:
