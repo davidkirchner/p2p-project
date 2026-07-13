@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from base64 import b64decode
+from base64 import b64decode, b64encode
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import timezone
@@ -237,7 +237,7 @@ class SimpleTerminalUI(Closable):
                         else:
                             selected_user = await self._input(ChoiceParser(selectable_users), f"You have to select among different users:")
                         user_data = await self.database.User.by_id(selectable_users[0])
-                        await self._print(f"You are now logged in as {user_data.name}")
+                        await self._print(f"You are now logged in as {user_data.name}.")
                         await self.set_user(selected_user)
 
                 elif self.chat is None:
@@ -277,6 +277,7 @@ class SimpleTerminalUI(Closable):
 
     async def set_user(self, user: UserID):
         self.user = user
+        await self._print(f"Your node ID (share it so others can start a chat with you): {b64encode(user).decode('ascii')}")
         await self._broadcast_state_change()
 
     async def set_chat(self, chat: ChatID):

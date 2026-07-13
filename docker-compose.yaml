@@ -1,0 +1,139 @@
+# Simple local P2P network.
+#
+#   Bootstrap + peer nodes: headless, run the whole time (`docker compose up`).
+#   Alice + Bob:            interactive terminal UI nodes, started manually.
+#
+# 1) Bring up the network (headless nodes only, in the background):
+#      docker compose up --build -d
+#      docker compose logs -f boot0        # optional: watch a headless node
+#
+# 2) Once it's up, start each UI node manually in its own terminal. A new
+#    identity is created live each time; the UI prints your node ID afterwards.
+#      docker compose run --rm alice
+#      docker compose run --rm bob
+#    To start a chat, paste the *other* node's printed ID at the peer-id prompt.
+#
+# 3) Tear everything down (--remove-orphans also cleans up leftover UI `run`
+#    containers if a UI node didn't exit cleanly):
+#      docker compose down --remove-orphans
+
+# Shared environment for every node.
+x-common-env: &common-env
+  BIND_HOST: "0.0.0.0"
+  KADEMLIA_PORT: "9009"
+  PYTHONUNBUFFERED: "1"
+  # Everyone bootstraps against the two seed nodes: "ip=<b64 pubkey>,...".
+  BOOTSTRAP_PEERS: "172.28.0.10=casZ7VB9O60gEwm7/ZX6eYY+oAV3hT6WNf2vrOlFvjU=,172.28.0.11=d51zQ82IdQYoPw89BGet20KMBweVZjTagMWyOzN/FLw="
+
+# Defaults shared by every service (image build, restart policy, network).
+x-node: &node
+  build: .
+  restart: unless-stopped
+  networks:
+    - p2p
+
+services:
+  # --- Bootstrap / seed nodes ------------------------------------------------
+  boot0:
+    <<: *node
+    container_name: p2p-boot0
+    command: ["python", "src/headless.py", "--name", "boot0", "wait", "999999"]
+    environment:
+      <<: *common-env
+      IDENTITY_SEED: "51e95380a1eed07acbbd7c567a0e153bf74e7572ec62687b55b5b05bb9b069e8"
+      SQLITE_PATH: ":memory:"
+      # Seed node: bootstraps against nobody.
+      BOOTSTRAP_PEERS: ""
+    networks:
+      p2p:
+        ipv4_address: 172.28.0.10
+
+  boot1:
+    <<: *node
+    container_name: p2p-boot1
+    command: ["python", "src/headless.py", "--name", "boot1", "wait", "999999"]
+    environment:
+      <<: *common-env
+      IDENTITY_SEED: "21dae65f702b74729d1b83759b29eb5072b33076d3809d303d2bce95a157ef95"
+      SQLITE_PATH: ":memory:"
+      # Only bootstrap against boot0 (avoid pointing at itself).
+      BOOTSTRAP_PEERS: "172.28.0.10=casZ7VB9O60gEwm7/ZX6eYY+oAV3hT6WNf2vrOlFvjU="
+    networks:
+      p2p:
+        ipv4_address: 172.28.0.11
+    depends_on:
+      - boot0
+
+  # --- Background headless peers ---------------------------------------------
+  peer0:
+    <<: *node
+    container_name: p2p-peer0
+    command: ["python", "src/headless.py", "--name", "peer0", "wait", "999999"]
+    environment:
+      <<: *common-env
+      IDENTITY_SEED: "f77e6ff4017430b4b1f29a6ed80644f915ca0f6d56ec04d8cd5b1f3f7ed46dfe"
+      SQLITE_PATH: ":memory:"
+    networks:
+      p2p:
+        ipv4_address: 172.28.0.20
+    depends_on:
+      - boot0
+      - boot1
+
+  peer1:
+    <<: *node
+    container_name: p2p-peer1
+    command: ["python", "src/headless.py", "--name", "peer1", "wait", "999999"]
+    environment:
+      <<: *common-env
+      IDENTITY_SEED: "698750a09b934337746f0973448167f364cae132e2f8b327ae4913e5b5445029"
+      SQLITE_PATH: ":memory:"
+    networks:
+      p2p:
+        ipv4_address: 172.28.0.21
+    depends_on:
+      - boot0
+      - boot1
+
+  peer2:
+    <<: *node
+    container_name: p2p-peer2
+    command: ["python", "src/headless.py", "--name", "peer2", "wait", "999999"]
+    environment:
+      <<: *common-env
+      IDENTITY_SEED: "3b213ced003e89b35a26c22cbd011c9bfab29578415b2069f7fc8b01998b903d"
+      SQLITE_PATH: ":memory:"
+    networks:
+      p2p:
+        ipv4_address: 172.28.0.22
+    depends_on:
+      - boot0
+      - boot1
+
+  # --- Interactive UI nodes ---------------------------------------------------
+  #   docker compose run --rm alice
+  #   docker compose run --rm bob
+  alice:
+    <<: *node
+    profiles: ["ui"]
+    restart: "no"
+    command: ["python", "src/main.py"]
+    environment:
+      <<: *common-env
+      SQLITE_PATH: ":memory:"
+
+  bob:
+    <<: *node
+    profiles: ["ui"]
+    restart: "no"
+    command: ["python", "src/main.py"]
+    environment:
+      <<: *common-env
+      SQLITE_PATH: ":memory:"
+
+networks:
+  p2p:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
