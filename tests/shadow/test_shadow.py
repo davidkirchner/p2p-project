@@ -1,19 +1,3 @@
-"""Minimal Shadow simulation test.
-
-Starts a small P2P network under the Shadow discrete-event simulator:
-  * 5 bootstrap nodes (boot0 seeds, the rest join through it)
-  * 10 regular peers (including alice and bob) that bootstrap off the cluster
-
-Alice waits for the DHT to settle, sends bob a message, and bob must receive it.
-
-Each node is `src/headless.py`, configured via environment variables and driven
-by a scenario string (see that module). Nodes print `EVENT ...` lines to stdout,
-which Shadow captures per host; the test asserts against bob's output.
-
-To grow this into bigger/other tests, add hosts to the lists in
-`_write_config` or change the per-host scenario strings.
-"""
-
 import base64
 import hashlib
 import shutil
@@ -86,35 +70,46 @@ def _node_id_b64(name: str) -> str:
     return _b64(UserEncryption.from_seed(_seed(name)).id)
 
 
+def _process(name: str, scenario: str, start: str,
+             bootstrap: list[tuple[str, str]], python_exe: str,
+             sqlite_path: str = ":memory:") -> dict:
+    """One `processes:` entry running headless.py with the given scenario.
+
+    `sqlite_path` defaults to an in-memory DB; pass a file path when a node
+    must keep its state across a restart (e.g. going offline and back online).
+    """
+    peers = ",".join(f"{bip}={_pubkey_b64(bname)}" for bname, bip in bootstrap)
+    return {
+        "path": python_exe,
+        "args": f"{HEADLESS} --name {name} {scenario}",
+        "start_time": start,
+        "expected_final_state": {"exited": 0},
+        "environment": {
+            "SQLITE_PATH": sqlite_path,
+            "BIND_HOST": "0.0.0.0",
+            "KADEMLIA_PORT": "9009",
+            "IDENTITY_SEED": _seed(name).hex(),
+            "BOOTSTRAP_PEERS": peers,
+            "PYTHONPATH": str(SRC_DIR),
+            "PYTHONUNBUFFERED": "1",
+        },
+    }
+
+
 def _host_block(name: str, ip: str, scenario: str, start: str,
                 bootstrap: list[tuple[str, str]], python_exe: str) -> dict:
-    """One `hosts:` entry running headless.py with the given scenario."""
-    peers = ",".join(f"{bip}={_pubkey_b64(bname)}" for bname, bip in bootstrap)
+    """One `hosts:` entry running a single headless.py process."""
     return {
         "network_node_id": 0,
         "ip_addr": ip,
-        "processes": [{
-            "path": python_exe,
-            "args": f"{HEADLESS} --name {name} {scenario}",
-            "start_time": start,
-            "expected_final_state": {"exited": 0},
-            "environment": {
-                "SQLITE_PATH": ":memory:",
-                "BIND_HOST": "0.0.0.0",
-                "KADEMLIA_PORT": "9009",
-                "IDENTITY_SEED": _seed(name).hex(),
-                "BOOTSTRAP_PEERS": peers,
-                "PYTHONPATH": str(SRC_DIR),
-                "PYTHONUNBUFFERED": "1",
-            },
-        }],
+        "processes": [_process(name, scenario, start, bootstrap, python_exe)],
     }
 
 
 def _write_config(tmp_path: Path, python_exe: str) -> Path:
     boots = [(f"boot{i}", f"10.0.0.{i + 1}") for i in range(5)]
     peers = [("alice", "10.0.0.6"), ("bob", "10.0.0.7")]
-    peers += [(f"peer{i}", f"10.0.0.{8 + i}") for i in range(8)]
+    peers += [(f"peer{i}", f"10.0.0.{8 + i}") for i in range(100)]
 
     bob_id = _node_id_b64("bob")
     hosts: dict[str, dict] = {}
@@ -170,3 +165,83 @@ def test_alice_sends_bob_a_message(tmp_path):
     bob_out = _host_stdout(data_dir, "bob")
     assert "EVENT recv" in bob_out, bob_out
     assert "hello bob" in bob_out, bob_out
+
+
+def _write_cache_config(tmp_path: Path, python_exe: str) -> Path:
+    boots = [(f"boot{i}", f"10.0.0.{i + 1}") for i in range(5)]
+    bg = [(f"peer{i}", f"10.0.0.{8 + i}") for i in range(100)]
+
+    alice_id = _node_id_b64("alice")
+    bob_id = _node_id_b64("bob")
+    alice_db = str(tmp_path / "alice.sqlite")
+
+    hosts: dict[str, dict] = {}
+
+    # Bootstrap cluster: boot0 seeds, the rest join through it.
+    for i, (name, ip) in enumerate(boots):
+        into = [] if i == 0 else [boots[0]]
+        hosts[name] = _host_block(name, ip, "wait 150", "1s", into, python_exe)
+
+    # Background peers keep the DHT populated (and hold cached values) throughout.
+    for name, ip in bg:
+        hosts[name] = _host_block(name, ip, "wait 150", "5s", boots, python_exe)
+
+    # Alice: online first to send Bob a message, then offline, then back to fetch.
+    # Both processes share one on-disk DB so the chat survives the restart.
+    hosts["alice"] = {
+        "network_node_id": 0,
+        "ip_addr": "10.0.0.6",
+        "processes": [
+            _process("alice", f'wait 25 send {bob_id} "hello bob" wait 20',
+                     "5s", boots, python_exe, sqlite_path=alice_db),
+            _process("alice", "wait 25 fetch-cached wait 25",
+                     "90s", boots, python_exe, sqlite_path=alice_db),
+        ],
+    }
+
+    # Bob: online the whole time. Receives Alice's message, then (at t~=60s,
+    # once Alice is offline) sends her one that has to be cached in the network.
+    hosts["bob"] = _host_block(
+        "bob", "10.0.0.7",
+        f'recv 55 send {alice_id} "cached hello" recv 90',
+        "5s", boots, python_exe,
+    )
+
+    config = {
+        "general": {
+            "stop_time": "180s",
+            "model_unblocked_syscall_latency": True,
+        },
+        "network": _NETWORK,
+        "hosts": hosts,
+    }
+    path = tmp_path / "shadow.yaml"
+    path.write_text(yaml.dump(config, Dumper=_Dumper, sort_keys=False))
+    return path
+
+
+@pytest.mark.shadow
+def test_offline_message_is_cached_and_retrieved(tmp_path):
+    config = _write_cache_config(tmp_path, sys.executable)
+    data_dir = tmp_path / "shadow.data"
+
+    result = subprocess.run(
+        ["shadow", "--data-directory", str(data_dir), str(config)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    assert result.returncode == 0, f"shadow failed:\n{result.stderr[-4000:]}"
+
+    bob_out = _host_stdout(data_dir, "bob")
+    # Bob got Alice's message while both were online...
+    assert "hello bob" in bob_out, bob_out
+    # ...and his reply to the now-offline Alice was cached, not delivered.
+    assert "EVENT sent ok=cached" in bob_out, bob_out
+
+    alice_out = _host_stdout(data_dir, "alice")
+    # Back online, Alice ran the fetch and pulled Bob's cached message.
+    assert "EVENT fetch_cached_done" in alice_out, alice_out
+    assert "EVENT recv" in alice_out, alice_out
+    assert "cached hello" in alice_out, alice_out
