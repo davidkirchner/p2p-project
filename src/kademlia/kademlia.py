@@ -51,7 +51,7 @@ def invent_peer(ip: str) -> Peer:
     return Peer(id=enc.id, ip=ip, pubkey=enc.public_bytes)
 
 
-BOOTSTRAP_PEERS = [invent_peer("127.0.0.1"), invent_peer("127.0.0.2")]
+BOOTSTRAP_PEERS = []
 
 BOOTSTRAP_LOOKUPS = 5
 

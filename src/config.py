@@ -23,7 +23,7 @@ class Config:
             return os.environ.get(prefix + name)
 
         path_str = env("SQLITE_PATH")
-        sqlite_path = Path(path_str) if path_str is not None else Path("var", "db", "db.sqlite")
+        sqlite_path = Path(path_str) if path_str is not None else Path("db.sqlite")
 
         bind_host = env("BIND_HOST") or "0.0.0.0"
 
