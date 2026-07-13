@@ -26,9 +26,13 @@ x-common-env: &common-env
   BOOTSTRAP_PEERS: "172.28.0.10=casZ7VB9O60gEwm7/ZX6eYY+oAV3hT6WNf2vrOlFvjU=,172.28.0.11=d51zQ82IdQYoPw89BGet20KMBweVZjTagMWyOzN/FLw="
 
 # Defaults shared by every service (image build, restart policy, network).
+# The source tree is bind-mounted so code changes take effect without rebuilding
+# the image — just restart the affected container (or re-run a UI node).
 x-node: &node
   build: .
   restart: unless-stopped
+  volumes:
+    - ./src:/app/src
   networks:
     - p2p
 

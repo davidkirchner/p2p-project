@@ -200,9 +200,10 @@ class SimpleTerminalUI(Closable):
         await self.close()
 
     async def _print(self, message: str, end: str | None = "\n"):
+        end = "" if end is None else end
         if self._print_indent:
-            print(self._indent, end=None)
-            self._print_indent = message.endswith("\n") or (end is not None and end.endswith("\n"))
+            print(self._indent, end="")
+            self._print_indent = message.endswith("\n") or end.endswith("\n")
         print(message.replace("\n", self._indent + "\n"), flush=True, sep=None, end=end)
 
     async def _print_message(self, msg: Message):
@@ -287,6 +288,7 @@ class SimpleTerminalUI(Closable):
     async def received_message(self, msg: Message):
         if msg.chat == self.chat:
             await self._print_message(msg)
+            await self._print(self._prompt, end=None)
         else:
             chat_title = (await self.database.Chat.by_id(msg.chat)).title
             await self._print(f"(new message in {chat_title})")
