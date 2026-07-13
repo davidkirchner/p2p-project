@@ -200,7 +200,7 @@ class MessagingService(Closable):
             peer_id=peer_id,
             chat_id=chat.id,
             shared_secret=chat.secret,
-            message=f"Chat Init from {self.kademlia.node_id}".encode("utf-8"),
+            message=f"Chat Init from {self.kademlia.node_id.hex()}".encode("utf-8"),
             content_type="text/plain",
             timestamp=datetime.now(tz=timezone.utc),
         )
