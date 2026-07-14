@@ -7,13 +7,6 @@ The scenario is given as positional tokens after `--name`:
     recv <seconds>            -- alias of wait, semantically "collect messages"
     send <b64-node-id> <text> -- (init chat if needed and) send a chat message
     fetch-cached              -- pull messages cached in the DHT for our chats
-
-All notable events are written to stdout as a `EVENT` line and shadow reads that
-stdout for making assertions in tests.
-
-Example:
-    IDENTITY_SEED=<hex> BOOTSTRAP_PEERS="10.0.0.1=<b64pub>" \\
-        python src/headless.py --name alice wait 5 send <b64 id> "hi bob" wait 20
 """
 
 import argparse

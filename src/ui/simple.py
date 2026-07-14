@@ -165,6 +165,8 @@ async def race(fs):
             await p
     return await done.pop()
 
+def base64_str(b: bytes) -> str:
+    return b64encode(b).decode('ascii')
 
 
 class SimpleTerminalUI(Closable):
@@ -230,7 +232,7 @@ class SimpleTerminalUI(Closable):
                         await self._print("No local users exist. You should create one I guess...")
                         if not await self._input(ConfirmParser(), "Create user?"):
                             return
-                        name = await self._input(parser=RegexParser(r"\w+"), pre_prompt="His name: ")
+                        name = await self._input(parser=RegexParser(r"\w+"), pre_prompt="Enter your name: ")
                         user = await self.handler.create_user(name)
                         await self.set_user(user.id)
                     else:
@@ -257,7 +259,12 @@ class SimpleTerminalUI(Closable):
                             continue
                         chat_id = chat.id
                     else:
-                        chat_id = await self._input(ChoiceParser([display_key(chat_id) for chat_id in chat_ids]), "Select one of your chats: ")
+                        chats = await asyncio.gather(*[self.database.Chat.by_id(cid) for cid in chat_ids])
+                        peer_labels = {}
+                        for chat in chats:
+                            others = [p for p in chat.participants if p != self.user]
+                            peer_labels[chat.id] = ", ".join(base64_str(o) for o in others) if others else base64_str(chat.id)
+                        chat_id = await self._input(ChoiceParser(chat_ids, formatter=lambda cid: peer_labels[cid]), "Select one of your chats: ")
                     await self.set_chat(chat_id)
                 else:
                     await self._messages_view()
@@ -281,7 +288,7 @@ class SimpleTerminalUI(Closable):
 
     async def set_user(self, user: UserID):
         self.user = user
-        await self._print(f"Your node ID (share it so others can start a chat with you): {display_key(user)}")
+        await self._print(f"Your node ID (share it so others can start a chat with you): {base64_str(user)}")
         await self._broadcast_state_change()
 
     async def set_chat(self, chat: ChatID | None):

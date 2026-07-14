@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Callable, Literal, cast
 from uuid import uuid4
+from base64 import b64encode
 
 from closable import Closable
 from config import Config

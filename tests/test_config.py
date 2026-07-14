@@ -17,7 +17,7 @@ class TestConfigFromEnv:
         for var in ("SQLITE_PATH", "BIND_HOST", "KADEMLIA_PORT", "BOOTSTRAP_PEERS", "IDENTITY_SEED"):
             monkeypatch.delenv(var, raising=False)
         cfg = Config.from_env()
-        assert cfg.sqlite_path == Path("var", "db", "db.sqlite")
+        assert cfg.sqlite_path == Path("db.sqlite")
         assert cfg.bind_host == "0.0.0.0"
         assert cfg.port == 9009
         assert cfg.bootstrap_peers is None
