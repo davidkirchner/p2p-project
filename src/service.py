@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Callable, Literal, cast
 from uuid import uuid4
+from base64 import b64encode
 
 from closable import Closable
 from config import Config
@@ -207,7 +208,7 @@ class MessagingService(Closable):
             participants=[own_id, peer_user.id],
         )
         # Send an initial chat message so the chat partner learns about the shared secret
-        init_content = f"Chat Init from {self.kademlia.node_id.hex()}".encode("utf-8")
+        init_content = f"Chat Init from {b64encode(self.kademlia.node_id).decode('ascii')}".encode("utf-8")
         init_ts = datetime.now(tz=timezone.utc)
         chat_init_success = await self.kademlia.chat_msg_req(
             peer_id=peer_id,
